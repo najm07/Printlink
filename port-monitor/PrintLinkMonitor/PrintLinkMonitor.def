@@ -1,0 +1,49 @@
+; PrintLinkMonitor.def — export the full MONITOR/MONITOR2 function set.
+; localspl resolves these by name when building the dispatch tables:
+;  - v3 (legacy) printers use the v1 ANSI entry points (OpenPort, WritePort,
+;    ...) resolved via GetProcAddress with v1 signatures (NO leading HANDLE);
+;    those map to the PL1_* implementations.
+;  - MONITOR2 (InitializePrintMonitor2 object table) is built from the object
+;    we return, but the W-suffixed names are also exported for components that
+;    resolve them by name; those map to the PL_* implementations.
+; The implementations use PL_*/PL1_* internal names because the winspool.h
+; public API (pulled in by windows.h) declares these names with different
+; signatures.
+EXPORTS
+    EnumPorts=PL1_EnumPorts
+    EnumPortsW=PL_EnumPortsW
+    OpenPort=PL1_OpenPort
+    OpenPortW=PL_OpenPortW
+    StartDocPort=PL1_StartDocPort
+    StartDocPortW=PL_StartDocPortW
+    WritePort=PL1_WritePort
+    WritePortW=PL_WritePort
+    ReadPort=PL1_ReadPort
+    ReadPortW=PL_ReadPort
+    EndDocPort=PL1_EndDocPort
+    EndDocPortW=PL_EndDocPort
+    ClosePort=PL1_ClosePort
+    ClosePortW=PL_ClosePort
+    AddPort=PL1_AddPort
+    AddPortW=PL_AddPortW
+    AddPortEx=PL_AddPortExW
+    AddPortExW=PL_AddPortExW
+    ConfigurePort=PL1_ConfigurePort
+    ConfigurePortW=PL_ConfigurePortW
+    DeletePort=PL1_DeletePort
+    DeletePortW=PL_DeletePortW
+    GetPrinterDataFromPort=PL1_GetPrinterDataFromPort
+    GetPrinterDataFromPortW=PL_GetPrinterDataFromPortW
+    SetPortTimeOuts=PL1_SetPortTimeOuts
+    SetPortTimeOutsW=PL_SetPortTimeOuts
+    XcvOpenPort=PL1_XcvOpenPort
+    XcvOpenPortW=PL_XcvOpenPortW
+    XcvDataPort=PL1_XcvDataPort
+    XcvDataPortW=PL_XcvDataPortW
+    XcvClosePort=PL1_XcvClosePort
+    XcvClosePortW=PL_XcvClosePort
+    Shutdown=PL1_Shutdown
+    InitializePrintMonitor2=PL_InitializePrintMonitor2
+    OpenPortEx=PL_OpenPortExW
+    OpenPortExW=PL_OpenPortExW
+    ShutdownPrintMonitor=PL_ShutdownPrintMonitor

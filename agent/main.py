@@ -1,0 +1,225 @@
+"""PrintLink entry point: wires identity, DB, discovery, server, sender, tray.
+
+Modes:
+  python main.py                          - tray app (receiver + sender)
+  python main.py --send <file> [--target <host_id>]   - one-shot direct send
+  python main.py --install-verbs          - Explorer 'Print with PrintLink'
+  python main.py --uninstall-verbs
+
+Run:  python main.py            (dev)
+Install: packaged exe registered in HKCU\\...\\Run for auto-start.
+"""
+import argparse
+import os
+import socket
+import sys
+import threading
+import time
+
+from identity import load_or_create_id
+from db import Database
+from discovery import Discovery
+from server import create_app, run_in_thread
+from sender import Sender
+from tray import PrintLinkTray
+from shares import sweep_expired_grants
+from pipe_reader import PipeReader
+from cli import (install_shell_verbs, uninstall_shell_verbs,
+                 resolve_send_target, check_send_file,
+                 save_selected_target, load_selected_target, pick_target_dialog)
+from config import DATA_DIR, LISTEN_PORT, SWEEP_INTERVAL_S
+from logutil import setup_logging, get_logger
+
+log = get_logger("main")
+
+# Port-monitor integration is legacy/optional: the direct-send path never
+# touches the Windows spooler. Set this env var (any value) to re-enable the
+# named-pipe reader for installations that still have the old virtual printer.
+LEGACY_PIPE_ENV = "PRINTLINK_LEGACY_PIPE"
+
+
+def _expiry_sweeper(db: Database, stop: threading.Event):
+    """Mark overdue grants expired every hour; also expire our client-side
+    remote_printers rows so the user sees accurate status."""
+    while not stop.wait(SWEEP_INTERVAL_S):
+        try:
+            n = sweep_expired_grants(db)
+            now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+            with db.connect() as con:
+                con.execute(
+                    "UPDATE remote_printers SET status='expired' "
+                    "WHERE status='active' AND expires_at < ?", (now,))
+            if n:
+                print(f"[PrintLink] swept {n} expired grant(s)")
+        except Exception as e:
+            print(f"[PrintLink] sweeper error: {e}")
+
+
+def _build_sender(db: Database, my_id: str, my_name: str) -> Sender:
+    discovery = Discovery(my_id, LISTEN_PORT)
+    return Sender(db, my_id, my_name, discovery.resolve), discovery
+
+
+def _cmd_send(args) -> int:
+    """One-shot direct send: no tray, no HTTP server, no spooler."""
+    setup_logging()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    my_id = load_or_create_id(DATA_DIR)
+    db = Database(DATA_DIR / "printlink.db")
+    ok, err = check_send_file(args.send)
+    if not ok:
+        log.error("send: %s", err)
+        print(f"[PrintLink] {err}", file=sys.stderr)
+        return 2
+    target = resolve_send_target(db, args.target, {})
+    if target is None:
+        target = load_selected_target(db)
+    if target is None:
+        target = pick_target_dialog(db)
+        if target is not None:
+            save_selected_target(*target)
+    if target is None:
+        log.error("send: no target resolved")
+        print("[PrintLink] no target: select a remote printer in the tray "
+              "or pass --target <host_id>", file=sys.stderr)
+        return 2
+    host_id, alias = target
+    discovery = Discovery(my_id, LISTEN_PORT, advertise=False)
+    sender = Sender(db, my_id, socket.gethostname(), discovery.resolve)
+    sender.on_delivered = lambda fp, hid, al: log.info(
+        "send delivered: %s -> %s @ %s", fp, al, hid)
+    sender.on_failed = lambda fp, hid, al: log.error(
+        "send FAILED after retries: %s -> %s @ %s", fp, al, hid)
+    try:
+        ok, msg = sender.print_file(args.send, host_id, alias)
+        if not ok:
+            log.error("send: rejected: %s", msg)
+            print(f"[PrintLink] {msg}", file=sys.stderr)
+            return 2
+        log.info("send queued: %s -> %s @ %s", args.send, alias, host_id)
+        delivered = sender.wait_idle(timeout=450)
+        log.info("send finished: delivered=%s", delivered)
+        if delivered:
+            print(f"[PrintLink] delivered to {alias} @ {host_id}")
+        else:
+            reason = sender.last_error or "unknown error"
+            log.error("send FAILED to %s @ %s: %s", alias, host_id, reason)
+            print(f"[PrintLink] failed to {alias} @ {host_id} — {reason}",
+                  file=sys.stderr)
+        return 0 if delivered else 1
+    finally:
+        discovery.close()
+
+
+def _cmd_tray() -> None:
+    setup_logging()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    stop = threading.Event()
+
+    # 1. identity + storage
+    my_id = load_or_create_id(DATA_DIR)
+    my_name = f"{socket.gethostname()}"
+    db = Database(DATA_DIR / "printlink.db")
+    log.info("PrintLink agent starting — PC ID: %s (%s), log in %s",
+             my_id, my_name, DATA_DIR / "printlink.log")
+
+    # 2. LAN discovery (advertise our ID, resolve others)
+    discovery = Discovery(my_id, LISTEN_PORT)
+
+    # 3. HTTP server (receiver) — tray callback wired after tray exists
+    tray_holder: dict = {}
+
+    def share_gate(sender_id, sender_name, alias, days) -> bool:
+        tray = tray_holder.get("tray")
+        return tray.on_share_request(sender_id, sender_name, alias, days) if tray else False
+
+    app = create_app(db, my_id, on_share_request=share_gate)
+    run_in_thread(app, LISTEN_PORT)
+
+    # 4. sender (client side, retry queue)
+    sender = Sender(db, my_id, my_name, discovery.resolve)
+
+    # 4b. legacy port-monitor pipe (opt-in; direct send never uses it)
+    selected_target = {"value": None}
+    persisted = load_selected_target(db)
+    if persisted:
+        selected_target["value"] = persisted
+        log.info("tray target seeded from persisted selection: %s @ %s",
+                 persisted[1], persisted[0])
+    if os.environ.get(LEGACY_PIPE_ENV, "0") == "1":
+        pipe_reader = PipeReader(sender, get_target=lambda: selected_target["value"])
+        pipe_reader.start()
+        log.warning("%s=1: legacy port-monitor pipe ENABLED", LEGACY_PIPE_ENV)
+    else:
+        pipe_reader = None
+        log.info("legacy port-monitor pipe disabled (set %s=1 to enable)",
+                 LEGACY_PIPE_ENV)
+
+    # 5. background expiry enforcement
+    sweeper = threading.Thread(target=_expiry_sweeper, args=(db, stop),
+                               daemon=True, name="printlink-sweeper")
+    sweeper.start()
+
+    # 6. tray on the main thread (pystray requirement)
+    def on_quit():
+        stop.set()
+        sender.stop()
+        if pipe_reader is not None:
+            pipe_reader.stop()
+        discovery.close()
+
+    def on_delivered(filepath, host_id, alias):
+        log.info("delivered %s to %s @ %s", filepath, alias, host_id)
+        try:
+            tray.on_delivered(filepath, host_id, alias)
+        except Exception:
+            log.exception("delivery notification failed")
+
+    def on_failed(filepath, host_id, alias):
+        log.error("giving up on %s -> %s @ %s", filepath, alias, host_id)
+        try:
+            tray.on_failed(filepath, host_id, alias)
+        except Exception:
+            log.exception("failure notification failed")
+
+    sender.on_delivered = on_delivered
+    sender.on_failed = on_failed
+
+    tray = PrintLinkTray(db, my_id, sender.request_share, on_quit,
+                         selected_target=selected_target,
+                         send_file_fn=sender.print_file)
+    tray_holder["tray"] = tray
+
+    try:
+        tray.run()  # blocks until Quit
+    finally:
+        on_quit()
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="PrintLinkAgent",
+                                     description="PrintLink tray app / direct sender")
+    parser.add_argument("--send", metavar="FILE", help="send a document PDF/image directly")
+    parser.add_argument("--target", metavar="HOST_ID",
+                        help="remote PC ID for --send (default: tray selection)")
+    parser.add_argument("--install-verbs", action="store_true",
+                        help="add Explorer 'Print with PrintLink' context menu")
+    parser.add_argument("--uninstall-verbs", action="store_true",
+                        help="remove the Explorer context menu")
+    args = parser.parse_args()
+
+    if args.install_verbs or args.uninstall_verbs:
+        setup_logging()  # verb mode is short-lived; still want the log line
+    if args.install_verbs:
+        install_shell_verbs()
+        return
+    if args.uninstall_verbs:
+        uninstall_shell_verbs()
+        return
+    if args.send:
+        sys.exit(_cmd_send(args))
+    _cmd_tray()
+
+
+if __name__ == "__main__":
+    main()

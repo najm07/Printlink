@@ -1,0 +1,7 @@
+pystray
+Pillow
+flask
+requests
+zeroconf
+cryptography
+pywin32; sys_platform == 'win32'

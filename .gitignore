@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+.python-version
+
+# Virtual environments
+.venv/
+.venv-1/
+venv/
+env/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Local tooling / editor
+.opencode/
+.idea/
+.vscode/
+*.swp
+
+# Graphify output (local knowledge graph)
+graphify-out/
+
+# Installer output
+installer/output/
+
+# C++ (port-monitor)
+port-monitor/PrintLinkMonitor/x64/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# C# (port-monitor/PrintLinkSetup)
+port-monitor/PrintLinkSetup/bin/
+port-monitor/PrintLinkSetup/obj/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Temp
+tmp/
+temp/
