@@ -15,6 +15,13 @@ with per-PC access grants that expire automatically.
   dialog. Pick your default remote printer in the tray, then print from any
   application as usual.
 
+```
+App -> "PrintLink Remote Printer" (XPS driver)
+   -> spooler -> PrintLinkMonitor.dll
+   -> named pipe -> tray agent -> AES-GCM over HTTP :9100
+   -> host agent -> physical printer
+```
+
 Jobs travel encrypted (AES-GCM keyed by the pairing token) directly PC-to-PC.
 No cloud, no server, no accounts.
 
