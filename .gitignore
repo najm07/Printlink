@@ -27,6 +27,7 @@ dist/
 
 # Local tooling / editor
 .opencode/
+AGENTS.md
 .idea/
 .vscode/
 *.swp
