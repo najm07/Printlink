@@ -6,7 +6,24 @@ import zipfile
 sys.path.insert(0, "agent")  # real printer_local, not the test_api stub
 sys.modules.pop("printer_local", None)
 
-from printer_local import sniff_format
+from printer_local import sniff_format, parse_page_spec
+
+
+def test_pages_all():
+    assert parse_page_spec("", 10) is None
+    assert parse_page_spec("all", 10) is None
+    assert parse_page_spec("*", 10) is None
+
+
+def test_pages_ranges():
+    assert parse_page_spec("1-3,5,8-10", 10) == [0, 1, 2, 4, 7, 8, 9]
+
+
+def test_pages_invalid():
+    assert parse_page_spec("0-5", 10) is None
+    assert parse_page_spec("3-1", 10) is None
+    assert parse_page_spec("12", 10) is None
+    assert parse_page_spec("x-y", 10) is None
 
 
 def _zip(pairs: dict[str, bytes]) -> bytes:

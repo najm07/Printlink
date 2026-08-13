@@ -5,6 +5,7 @@ Responsibilities:
 - POST /request-share when the user adds a remote printer
 - POST /print jobs with token auth; queue + retry while the host is unreachable
 """
+import json
 import os
 import threading
 import queue
@@ -122,27 +123,33 @@ class Sender:
 
     # ---------- printing ----------
     def print_file(self, filepath: str | Path, host_id: str, printer_alias: str,
-                   delete_after: bool = False) -> tuple[bool, str]:
+                   delete_after: bool = False,
+                   options: dict | None = None) -> tuple[bool, str]:
         """Queue a file for delivery to a remote printer.
 
         delete_after: only the legacy pipe reader sets this for its own temp
-        job files. User documents handed in directly are NEVER deleted."""
+        job files. User documents handed in directly are NEVER deleted.
+        options: print preferences (copies/pages/paper/color/duplex/fit) sent
+        to the receiver, which applies what it can per format.
+        """
         check = get_usable_printer(self.db, host_id, printer_alias)
         if not check["ok"]:
             log.warning("print_file %s -> %s@%s rejected: %s",
                         filepath, printer_alias, host_id, check["error"])
             return False, check["error"]
         self._jobs.put((str(filepath), normalize_id(host_id), printer_alias, 0,
-                        delete_after))
+                        bool(delete_after), dict(options or {})))
         with self._lock:
             self._pending += 1
             self._ever_failed = False
             self._drained.clear()
-        log.info("print_file %s queued for %s@%s", filepath, printer_alias, host_id)
+        log.info("print_file %s queued for %s@%s (options=%r)",
+                 filepath, printer_alias, host_id, options or {})
         return True, "Job queued."
 
     def _send_once(self, filepath: str, host_id: str,
-                   printer_alias: str) -> tuple[bool, bool]:
+                   printer_alias: str, options: dict | None = None
+                   ) -> tuple[bool, bool]:
         """Try once. Returns (delivered, retryable).
 
         Retryable: connection errors and HTTP 503 (printer offline, may
@@ -161,9 +168,13 @@ class Sender:
             payload = encrypt_payload(raw, rp["token"])
             log.info("send %s -> %s/print (%d -> %d encrypted bytes, alias=%s)",
                      filepath, base, len(raw), len(payload), printer_alias)
+            data = None
+            if options:
+                data = {"options": json.dumps(options)}
             r = requests.post(f"{base}/print",
                               headers={"X-Sender-ID": self.my_id, "X-Token": rp["token"]},
                               files={"file": (Path(filepath).name, payload)},
+                              data=data,
                               timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
             log.info("send %s -> HTTP %d body=%s", Path(filepath).name,
                      r.status_code, r.text[:200])
@@ -196,10 +207,10 @@ class Sender:
             except queue.Empty:
                 pass
             still = []
-            for filepath, host_id, alias, attempts, delete_after in pending:
+            for filepath, host_id, alias, attempts, delete_after, options in pending:
                 log.info("retry_loop: attempt %d for %s@%s (%s)",
                          attempts + 1, alias, host_id, Path(filepath).name)
-                ok, retryable = self._send_once(filepath, host_id, alias)
+                ok, retryable = self._send_once(filepath, host_id, alias, options)
                 if ok:
                     if delete_after:
                         self._cleanup(filepath)
@@ -217,7 +228,7 @@ class Sender:
                     continue
                 if attempts + 1 < max_attempts:
                     still.append((filepath, host_id, alias, attempts + 1,
-                                  delete_after))
+                                  delete_after, options))
                 else:
                     log.error("retry_loop: giving up on %s after %d attempts",
                               Path(filepath).name, max_attempts)

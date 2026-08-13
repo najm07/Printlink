@@ -8,6 +8,7 @@ Endpoints:
 
 Run in a background thread from the tray app.
 """
+import json
 import os
 import tempfile
 import threading
@@ -19,13 +20,28 @@ from db import Database
 from shares import create_grant, authorize_print, DEFAULT_SHARE_DAYS
 from printer_local import (list_printers, printer_status, print_via_shell,
                            print_text, print_emf, print_word, print_image,
-                           sniff_format, extract_emf)
+                           print_pdf, sniff_format, extract_emf,
+                           DEFAULT_OPTIONS)
 from identity import normalize_id
 from crypto import decrypt_payload
 from config import LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME
 from logutil import get_logger
 
 log = get_logger("server")
+
+
+def _parse_options(raw: str | None) -> dict | None:
+    """Validate the optional 'options' form field; None when absent/empty."""
+    if not raw or not raw.strip():
+        return {}
+    try:
+        opts = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(opts, dict):
+        return None
+    return {k: opts.get(k) for k in DEFAULT_OPTIONS
+            if opts.get(k) not in (None, "")}
 
 
 def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
@@ -109,6 +125,14 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
             log.error("print: decrypt FAILED (invalid payload format)")
             return jsonify({"error": "invalid payload"}), 400
 
+        opts = _parse_options(request.form.get("options"))
+        if opts is None:
+            log.warning("print: malformed options field: %r",
+                        request.form.get("options"))
+            return jsonify({"error": "invalid options"}), 400
+        if opts:
+            log.info("print: options=%r", opts)
+
         fmt = sniff_format(payload)
         suffix = {"pdf": ".pdf", "xps": ".xps", "emf": ".emf",
                   "text": ".txt", "binary": ".bin", "docx": ".docx",
@@ -135,20 +159,28 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
                 print_emf(emf, printer_name,
                           f"PrintLink {upload.filename or 'job'}")
                 log.info("print: EMF rendered on '%s' (%d bytes)", printer_name, len(emf))
+            elif fmt == "pdf":
+                print_pdf(path, printer_name, opts)
+                log.info("print: PDF printed on '%s' (options=%r)", printer_name, opts)
             elif fmt == "text":
                 try:
-                    print_text(payload, printer_name, f"PrintLink {upload.filename or 'job'}")
-                    log.info("print: text spooled via TEXT datatype on '%s'", printer_name)
-                except Exception as te:
-                    log.warning("print: TEXT datatype failed (%r), falling back to Notepad printto", te)
-                    print_via_shell(path, printer_name)
+                    copies = max(1, int(opts.get("copies") or 1))
+                except (TypeError, ValueError):
+                    copies = 1
+                print_text(payload, printer_name,
+                           f"PrintLink {upload.filename or 'job'}", copies=copies)
+                log.info("print: text spooled via TEXT datatype on '%s' "
+                         "(copies=%d)", printer_name, copies)
             elif fmt in ("docx", "doc"):
-                print_word(path, printer_name)
-                log.info("print: Word document printed on '%s' (%s)", printer_name, fmt)
+                print_word(path, printer_name, opts)
+                log.info("print: Word document printed on '%s' (%s)",
+                         printer_name, fmt)
             elif fmt in ("png", "jpg", "gif", "bmp", "webp", "tiff"):
-                print_image(path, printer_name)
+                print_image(path, printer_name, opts)
                 log.info("print: image %s rendered on '%s'", fmt, printer_name)
             else:
+                if opts:
+                    log.warning("print: options not applicable to %s; ignored", fmt)
                 print_via_shell(path, printer_name)
             log.info("print: job spooled+printed on '%s' (alias %s)",
                      printer_name, auth["printer"]["alias"])

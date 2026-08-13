@@ -27,6 +27,7 @@ from pipe_reader import PipeReader
 from cli import (install_shell_verbs, uninstall_shell_verbs,
                  resolve_send_target, check_send_file,
                  save_selected_target, load_selected_target, pick_target_dialog)
+from preview import ask_print_options
 from config import DATA_DIR, LISTEN_PORT, SWEEP_INTERVAL_S
 from logutil import setup_logging, get_logger
 
@@ -84,6 +85,10 @@ def _cmd_send(args) -> int:
               "or pass --target <host_id>", file=sys.stderr)
         return 2
     host_id, alias = target
+    opts = ask_print_options(args.send, f"{alias} @ {host_id}")
+    if opts is None:
+        log.info("send cancelled by user (preview dialog)")
+        return 0
     discovery = Discovery(my_id, LISTEN_PORT, advertise=False)
     sender = Sender(db, my_id, socket.gethostname(), discovery.resolve)
     sender.on_delivered = lambda fp, hid, al: log.info(
@@ -91,7 +96,7 @@ def _cmd_send(args) -> int:
     sender.on_failed = lambda fp, hid, al: log.error(
         "send FAILED after retries: %s -> %s @ %s", fp, al, hid)
     try:
-        ok, msg = sender.print_file(args.send, host_id, alias)
+        ok, msg = sender.print_file(args.send, host_id, alias, options=opts)
         if not ok:
             log.error("send: rejected: %s", msg)
             print(f"[PrintLink] {msg}", file=sys.stderr)

@@ -6,16 +6,20 @@ import pytest
 
 # stub Windows-only printing before server imports it
 fake = types.ModuleType("printer_local")
+fake.DEFAULT_OPTIONS = {"copies": 1, "pages": "", "paper": "auto",
+                        "color": "color", "duplex": "off",
+                        "orientation": "auto", "fit": "fit"}
 fake.list_printers = lambda: ["HP LaserJet Pro"]
 fake.printer_status = lambda n: {"offline": False, "paused": False,
                                  "error": False, "jobs_queued": 0,
                                  "port": "USB001", "name": n}
 PRINTED = []
 fake.print_via_shell = lambda path, printer: PRINTED.append((open(path, "rb").read(), printer))
-fake.print_text = lambda data, printer, job="PrintLink Job": PRINTED.append((data, printer))
+fake.print_text = lambda data, printer, job="PrintLink Job", copies=1: PRINTED.append((data, printer))
 fake.print_emf = lambda data, printer, job="PrintLink Job": PRINTED.append((data, printer))
-fake.print_word = lambda path, printer: PRINTED.append((open(path, "rb").read(), printer))
-fake.print_image = lambda path, printer: PRINTED.append((open(path, "rb").read(), printer))
+fake.print_word = lambda path, printer, opts=None: PRINTED.append((open(path, "rb").read(), printer))
+fake.print_image = lambda path, printer, opts=None: PRINTED.append((open(path, "rb").read(), printer))
+fake.print_pdf = lambda path, printer, opts=None: PRINTED.append((open(path, "rb").read(), printer, opts))
 fake.sniff_format = lambda d: ("pdf" if d[:5] == b"%PDF-" else
                                "docx" if b"word/document.xml" in d else
                                "png" if d[:4] == b"\x89PNG" else
@@ -43,11 +47,15 @@ def request_share(client, sender="111 222 333", alias="Accounting-HP"):
     return r
 
 
-def do_print(client, token, sender="111 222 333", payload=b"%PDF-1.4 test"):
+def do_print(client, token, sender="111 222 333", payload=b"%PDF-1.4 test",
+             options=None):
     body = encrypt_payload(payload, token)
+    fields = {"file": (io.BytesIO(body), "doc.pdf")}
+    if options is not None:
+        import json
+        fields["options"] = json.dumps(options)
     return client.post("/print", headers={"X-Sender-ID": sender, "X-Token": token},
-                       data={"file": (io.BytesIO(body), "doc.pdf")},
-                       content_type="multipart/form-data")
+                       data=fields, content_type="multipart/form-data")
 
 
 def test_ping(env):
@@ -124,3 +132,30 @@ def test_print_png(env):
     assert r.status_code == 200 and r.get_json()["status"] == "accepted"
     assert PRINTED[-1][1] == "HP LaserJet Pro"
     assert PRINTED[-1][0].startswith(b"\x89PNG")
+
+
+def test_print_pdf_with_options(env):
+    client, _ = env
+    token = request_share(client).get_json()["token"]
+    r = do_print(client, token,
+                 options={"copies": 2, "pages": "1-3,5", "paper": "A4",
+                          "color": "mono", "duplex": "long", "fit": "fit"})
+    assert r.status_code == 200 and r.get_json()["status"] == "accepted"
+    assert PRINTED[-1][2] == {"copies": 2, "pages": "1-3,5", "paper": "A4",
+                              "color": "mono", "duplex": "long", "fit": "fit"}
+
+
+def test_print_bad_options_400(env):
+    client, _ = env
+    token = request_share(client).get_json()["token"]
+    r = do_print(client, token, options="not-json{")
+    assert r.status_code == 400
+
+
+def test_print_text_copies(env):
+    client, _ = env
+    token = request_share(client).get_json()["token"]
+    r = do_print(client, token, payload=b"hello text\n",
+                 options={"copies": 3})
+    assert r.status_code == 200
+    assert PRINTED[-1] == (b"hello text\n", "HP LaserJet Pro")

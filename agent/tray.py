@@ -125,9 +125,14 @@ class PrintLinkTray:
             if target is None:
                 return
         host_id, alias = target
-        ok, msg = self.send_file_fn(path, host_id, alias)
-        log.info("send document %s -> %s @ %s: ok=%s msg=%r",
-                 path, alias, host_id, ok, msg)
+        from preview import ask_print_options
+        opts = _dialog(lambda root: ask_print_options(path, f"{alias} @ {host_id}"))
+        if opts is None:
+            log.info("send document cancelled by user (preview dialog)")
+            return
+        ok, msg = self.send_file_fn(path, host_id, alias, options=opts)
+        log.info("send document %s -> %s @ %s: ok=%s msg=%r options=%r",
+                 path, alias, host_id, ok, msg, opts)
         _notify("PrintLink", msg if ok else f"Failed: {msg}")
 
     def on_delivered(self, filepath: str, host_id: str, printer_alias: str):

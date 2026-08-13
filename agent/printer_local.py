@@ -13,6 +13,39 @@ from logutil import get_logger
 
 log = get_logger("printer_local")
 
+DEFAULT_OPTIONS = {"copies": 1, "pages": "", "paper": "auto", "color": "color",
+                   "duplex": "off", "orientation": "auto", "fit": "fit"}
+
+
+def parse_page_spec(spec: str, page_count: int) -> list[int] | None:
+    """'1-3,5,8-10' -> 0-based page list; None when 'all'/empty/unparseable."""
+    spec = (spec or "").strip()
+    if not spec or spec.lower() in ("all", "*"):
+        return None
+    out: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                lo, hi = int(a), int(b)
+            except ValueError:
+                return None
+            if lo < 1 or hi > page_count or lo > hi:
+                return None
+            out.extend(range(lo - 1, hi))
+        else:
+            try:
+                p = int(part)
+            except ValueError:
+                return None
+            if p < 1 or p > page_count:
+                return None
+            out.append(p - 1)
+    return sorted(set(out)) or None
+
 
 def list_printers() -> list[str]:
     """All locally installed printers (USB, network, virtual)."""
@@ -46,25 +79,19 @@ def printer_status(printer_name: str) -> dict:
 
 
 def print_via_shell(filepath: str, printer_name: str, timeout: int = 120) -> None:
-    """Print PDF/image through the registered shell handler ('printto' verb).
+    """Print via the registered shell handler ('printto' verb); no options.
 
-    PDFs go through SumatraPDF's CLI when installed (file-association
-    independent, survives broken/missing default app), else the 'printto'
-    verb is used. Images always use 'printto' (Photos/mspaint).
-    Raises RuntimeError if no handler works or the job doesn't complete.
+    Used for Office spreadsheets/presentations (Excel/PPT printto verb) and
+    XPS. PDFs/images take the dedicated option-aware paths instead.
+    Raises RuntimeError if the handler doesn't exit in time.
     """
-    if os.path.splitext(filepath)[1].lower() == ".pdf":
-        sumatra = _find_sumatra()
-        if sumatra:
-            _print_with_sumatra(sumatra, filepath, printer_name, timeout)
-            return
     try:
         win32api.ShellExecute(0, "printto", os.path.abspath(filepath),
                               f'"{printer_name}"', ".", 0)
     except Exception as e:
         raise RuntimeError(
-            f"ShellExecute printto failed ({e}); no default PDF app with a "
-            f"'printto' verb? Install SumatraPDF on this host") from e
+            f"ShellExecute printto failed ({e}); no default app with a "
+            f"'printto' verb for this file type?") from e
     log.info("print_via_shell: ShellExecute printto '%s' <- %s (polling up to %ds)",
              printer_name, filepath, timeout)
     # ShellExecute is async; poll the queue until the job appears/drains
@@ -116,36 +143,110 @@ def _find_sumatra() -> str | None:
     return None
 
 
-def _print_with_sumatra(sumatra: str, filepath: str, printer_name: str,
-                        timeout: int) -> None:
-    """SumatraPDF CLI: -print-to <printer> -silent <pdf> (silent, then exits)."""
-    import subprocess
-    cmd = [sumatra, "-print-to", printer_name, "-silent",
-           "-exit-on-print", os.path.abspath(filepath)]
-    log.info("print_via_shell: %s (timeout=%ds)", " ".join(cmd), timeout)
+def print_pdf(filepath: str, printer_name: str, opts: dict | None = None,
+              timeout: int = 180) -> None:
+    """Print a PDF honoring copies / page range / paper / color / duplex / fit.
+
+    Page range is applied by re-rendering a subset PDF with PyMuPDF; the rest
+    maps onto SumatraPDF's -print-settings. Requires SumatraPDF on the host.
+    """
+    opts = {**DEFAULT_OPTIONS, **(opts or {})}
+    subset = filepath
+    temp = None
+    pages = str(opts.get("pages") or "").strip()
+    if pages and pages.lower() not in ("all", "*"):
+        try:
+            import pymupdf
+        except ImportError:
+            import fitz as pymupdf
+        with pymupdf.open(filepath) as doc:
+            want = parse_page_spec(pages, doc.page_count)
+            if want is not None and len(want) != doc.page_count:
+                out = pymupdf.open()
+                try:
+                    for p in want:
+                        out.insert_pdf(doc, from_page=p, to_page=p)
+                    fd, temp = tempfile.mkstemp(suffix=".pdf",
+                                                dir=tempfile.gettempdir())
+                    os.close(fd)
+                    out.save(temp)
+                finally:
+                    out.close()
+                subset = temp
+    sumatra = _find_sumatra()
+    if not sumatra:
+        raise RuntimeError("SumatraPDF not found on this host; PDF printing "
+                           "unavailable")
+    settings = _sumatra_settings(opts)
+    cmd = [sumatra, "-print-to", printer_name, "-silent", "-exit-on-print"]
+    if settings:
+        cmd += ["-print-settings", settings]
+    cmd.append(os.path.abspath(subset))
+    log.info("print_pdf: %s (timeout=%ds)", " ".join(cmd), timeout)
     try:
+        import subprocess
         r = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"SumatraPDF print timed out after {timeout}s") from e
-    if r.returncode != 0:
-        err = (r.stderr.decode("utf-8", "replace")
-               + r.stdout.decode("utf-8", "replace")).strip()
-        raise RuntimeError(f"SumatraPDF exit {r.returncode}: {err[:300]}")
-    log.info("print_via_shell: SumatraPDF printed '%s' on '%s'",
-             os.path.basename(filepath), printer_name)
+        if r.returncode != 0:
+            err = (r.stderr.decode("utf-8", "replace")
+                   + r.stdout.decode("utf-8", "replace")).strip()
+            raise RuntimeError(f"SumatraPDF exit {r.returncode}: {err[:300]}")
+        log.info("print_pdf: printed '%s' on '%s' (pages=%r copies=%s)",
+                 os.path.basename(filepath), printer_name, pages,
+                 opts.get("copies"))
+    finally:
+        if temp:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
 
 
-def print_word(filepath: str, printer_name: str, timeout: int = 180) -> None:
+def _sumatra_settings(opts: dict) -> str:
+    """Map our option dict onto SumatraPDF -print-settings syntax."""
+    parts = []
+    paper = str(opts.get("paper") or "auto").strip()
+    if paper.lower() not in ("auto", "default", ""):
+        parts.append(f"paper={paper.upper()}")
+    scale = str(opts.get("fit") or "fit").lower()
+    if scale == "actual":
+        parts.append("scale=none")
+    elif scale in ("fit", "shrink"):
+        parts.append(f"scale={scale}")
+    if str(opts.get("color") or "color").lower() == "mono":
+        parts.append("color=mono")
+    duplex = str(opts.get("duplex") or "off").lower()
+    if duplex in ("long", "short"):
+        parts.append(f"duplex={duplex}")
+    elif duplex == "on":
+        parts.append("duplex=long")
+    try:
+        copies = max(1, int(opts.get("copies") or 1))
+    except (TypeError, ValueError):
+        copies = 1
+    if copies > 1:
+        parts.append(f"copies={copies}")
+    return ",".join(parts)
+
+
+def print_word(filepath: str, printer_name: str, opts: dict | None = None,
+               timeout: int = 180) -> None:
     """Print a Word document (.docx/.doc) via Word COM automation.
 
-    Uses the registered ActivePrinter; requires Microsoft Word on the host.
-    Runs in a watchdog thread so a hung Word cannot block the HTTP handler.
+    Honors copies and page range ("1-3,5"); paper/color follow the document
+    and driver defaults. Requires Microsoft Word on the host. Runs in a
+    watchdog thread so a hung Word cannot block the HTTP handler.
     """
+    opts = {**DEFAULT_OPTIONS, **(opts or {})}
     import pythoncom
     import subprocess
     import threading
     import win32com.client
 
+    try:
+        copies = max(1, int(opts.get("copies") or 1))
+    except (TypeError, ValueError):
+        copies = 1
+    pages = str(opts.get("pages") or "").strip()
     result: dict = {}
 
     def worker():
@@ -162,11 +263,15 @@ def print_word(filepath: str, printer_name: str, timeout: int = 180) -> None:
                             "using Word default", printer_name)
             doc = word.Documents.Open(os.path.abspath(filepath), ReadOnly=True)
             try:
-                doc.PrintOut()
+                if pages and pages.lower() not in ("all", "*"):
+                    doc.PrintOut(Background=False, Range=3,  # wdPrintRangeOfPages
+                                 Pages=pages, Copies=copies)
+                else:
+                    doc.PrintOut(Background=False, Copies=copies)
             finally:
                 doc.Close(SaveChanges=0)
-            log.info("print_word: printed '%s' on '%s'",
-                     os.path.basename(filepath), printer_name)
+            log.info("print_word: printed '%s' on '%s' (pages=%r copies=%s)",
+                     os.path.basename(filepath), printer_name, pages, copies)
         except Exception as e:
             result["error"] = f"Word print failed: {e!r}"
         finally:
@@ -201,21 +306,23 @@ def print_raw(data: bytes, printer_name: str, job_name: str = "PrintLink Job") -
         win32print.ClosePrinter(h)
 
 
-def print_text(data: bytes, printer_name: str, job_name: str = "PrintLink Job") -> None:
+def print_text(data: bytes, printer_name: str, job_name: str = "PrintLink Job",
+               copies: int = 1) -> None:
     """Print plain-text bytes via the spooler's TEXT print processor.
 
     Spooled data from a "Generic / Text Only" sender queue is raw text; the
     spooler's TEXT datatype renders it on any driver (LF -> CRLF, form feed).
     """
-    h = win32print.OpenPrinter(printer_name)
-    try:
-        win32print.StartDocPrinter(h, 1, (job_name, None, "TEXT"))
-        win32print.StartPagePrinter(h)
-        win32print.WritePrinter(h, data)
-        win32print.EndPagePrinter(h)
-        win32print.EndDocPrinter(h)
-    finally:
-        win32print.ClosePrinter(h)
+    for _ in range(max(1, copies)):
+        h = win32print.OpenPrinter(printer_name)
+        try:
+            win32print.StartDocPrinter(h, 1, (job_name, None, "TEXT"))
+            win32print.StartPagePrinter(h)
+            win32print.WritePrinter(h, data)
+            win32print.EndPagePrinter(h)
+            win32print.EndDocPrinter(h)
+        finally:
+            win32print.ClosePrinter(h)
 
 
 def is_binary_document(data: bytes) -> bool:
@@ -223,31 +330,66 @@ def is_binary_document(data: bytes) -> bool:
     return data.startswith(b"PK\x03\x04") or data.startswith(b"%PDF-")
 
 
-_EMF_PRINT_PS = r"""param([string]$Path, [string]$Printer)
+_EMF_PRINT_PS = r"""param([string]$Path, [string]$Printer,
+      [string]$Paper = "", [string]$Orientation = "auto",
+      [string]$Color = "color", [string]$Fit = "fit", [int]$Copies = 1)
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Drawing.Printing
 $img = [System.Drawing.Image]::FromFile($Path)
 $doc = New-Object System.Drawing.Printing.PrintDocument
 $doc.PrinterSettings.PrinterName = $Printer
-$doc.DocumentName = "PrintLink EMF"
+$doc.DocumentName = "PrintLink Image"
+if ($Paper -ne "") {
+    foreach ($p in $doc.PrinterSettings.PaperSizes) {
+        if ($p.PaperName -ieq $Paper) { $doc.DefaultPageSettings.PaperSize = $p; break }
+    }
+}
+if ($Orientation -eq "landscape") { $doc.DefaultPageSettings.Landscape = $true }
+if ($Orientation -eq "portrait")  { $doc.DefaultPageSettings.Landscape = $false }
+$mono = ($Color -ieq "mono")
+$attr = New-Object System.Drawing.Imaging.ImageAttributes
+if ($mono) {
+    $m = New-Object System.Drawing.Imaging.ColorMatrix
+    $m.Matrix00 = 0.30; $m.Matrix01 = 0.30; $m.Matrix02 = 0.30
+    $m.Matrix10 = 0.59; $m.Matrix11 = 0.59; $m.Matrix12 = 0.59
+    $m.Matrix20 = 0.11; $m.Matrix21 = 0.11; $m.Matrix22 = 0.11
+    $attr.SetColorMatrix($m)
+}
+$fitMode = $Fit.ToLower()
 $doc.add_PrintPage({
     param($sender, $e)
-    $e.Graphics.DrawImage($img, 0, 0)
+    $g = $e.Graphics
+    $r = $e.MarginBounds
+    if ($r.Width -le 0 -or $r.Height -le 0) { $r = $e.PageBounds }
+    $s = 1.0
+    $sx = $r.Width / $img.Width
+    $sy = $r.Height / $img.Height
+    if ($fitMode -eq "fit")    { $s = [Math]::Min($sx, $sy) }
+    if ($fitMode -eq "shrink") { $s = [Math]::Min(1.0, [Math]::Min($sx, $sy)) }
+    $w = [int]($img.Width * $s);  $h = [int]($img.Height * $s)
+    $x = $r.X + [int](($r.Width - $w) / 2)
+    $y = $r.Y + [int](($r.Height - $h) / 2)
+    $g.DrawImage($img, $x, $y, $w, $h, 0, 0, $img.Width, $img.Height,
+                 [System.Drawing.GraphicsUnit]::Pixel, $attr)
     $e.HasMorePages = $false
 })
-try { $doc.Print() }
-finally {
+try {
+    for ($i = 0; $i -lt $Copies; $i++) { $doc.Print() }
+} finally {
     $doc.Dispose()
     $img.Dispose()
+    $attr.Dispose()
 }
 """
 
 
-def _run_gdi_print(path: str, printer_name: str, timeout: int = 180) -> None:
+def _run_gdi_print(path: str, printer_name: str, opts: dict | None = None,
+                   timeout: int = 180) -> None:
     """Render an image file (EMF/PNG/JPG/GIF/BMP/...) via GDI+ onto the printer.
 
     Uses the built-in .NET System.Drawing pipeline (no external app needed).
     """
+    opts = {**DEFAULT_OPTIONS, **(opts or {})}
     import subprocess
     import tempfile
     script = os.path.join(tempfile.gettempdir(), "pl_print_emf.ps1")
@@ -255,7 +397,12 @@ def _run_gdi_print(path: str, printer_name: str, timeout: int = 180) -> None:
         f.write(_EMF_PRINT_PS)
     r = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-         "-File", script, "-Path", path, "-Printer", printer_name],
+         "-File", script, "-Path", path, "-Printer", printer_name,
+         "-Paper", str(opts.get("paper") or ""),
+         "-Orientation", str(opts.get("orientation") or "auto"),
+         "-Color", str(opts.get("color") or "color"),
+         "-Fit", str(opts.get("fit") or "fit"),
+         "-Copies", str(max(1, int(opts.get("copies") or 1)))],
         capture_output=True, timeout=timeout)
     if r.returncode != 0:
         err = r.stderr.decode("utf-8", "replace") + r.stdout.decode("utf-8", "replace")
@@ -283,9 +430,14 @@ def print_emf(data: bytes, printer_name: str, job_name: str = "PrintLink Job") -
             pass
 
 
-def print_image(filepath: str, printer_name: str, timeout: int = 180) -> None:
-    """Print a PNG/JPG/GIF/BMP/TIFF/WEBP file via GDI+ (no app required)."""
-    _run_gdi_print(os.path.abspath(filepath), printer_name, timeout=timeout)
+def print_image(filepath: str, printer_name: str, opts: dict | None = None,
+                timeout: int = 180) -> None:
+    """Print a PNG/JPG/GIF/BMP/TIFF/WEBP file via GDI+ (no app required).
+
+    Honors copies / paper / orientation / mono color / fit via the PS script.
+    """
+    _run_gdi_print(os.path.abspath(filepath), printer_name, opts=opts,
+                   timeout=timeout)
 
 
 def extract_emf(data: bytes) -> bytes | None:

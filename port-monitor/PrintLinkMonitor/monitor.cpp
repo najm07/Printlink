@@ -5,6 +5,17 @@
 //   [8 bytes little-endian payload length][payload bytes]
 // The Python agent (pipe_reader.py) owns the pipe; this DLL stays stateless.
 //
+// !!! UNSUPPORTED CONTRACT WARNING !!!
+// This DLL depends on reverse-engineered internals of localspl.dll on
+// Windows 11 24H2 / build 26100 (see below). The InitializePrintMonitor2
+// object layout and the despool ReadPort/WritePort semantics are NOT a
+// documented Windows API — they are specific to this build and are subject
+// to change without notice. A Windows update (especially a spooler/localspl
+// change) can break printing silently; if jobs fail after an update, treat
+// the contract below as suspect first. There is no support commitment for
+// this path — if it breaks, the fallback is the v1 (ANSI) monitor interface,
+// which the despool also probes (PL1_* functions below).
+//
 // IMPORTANT (Windows 11 24H2 / build 26100 contract, reverse-engineered from
 // localspl.dll via crash dumps):
 //  - localspl!CreateMonitorEntry loads the DLL, calls
