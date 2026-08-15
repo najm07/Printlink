@@ -125,11 +125,25 @@ class PrintLinkTray:
             if target is None:
                 return
         host_id, alias = target
+        rows = self.db.list_remote_printers(status="active")
+        printers = [(r["host_id"], r["printer_alias"]) for r in rows]
+        if not printers:
+            _notify("PrintLink", "No active remote printers. Add one first via "
+                                  "'Add remote printer by ID...'.")
+            return
+        if (host_id, alias) not in printers:
+            host_id, alias = printers[0]
         from preview import ask_print_options
-        opts = _dialog(lambda root: ask_print_options(path, f"{alias} @ {host_id}"))
-        if opts is None:
+        res = _dialog(lambda root: ask_print_options(path, printers,
+                                                     selected=(host_id, alias),
+                                                     parent=root))
+        if res is None:
             log.info("send document cancelled by user (preview dialog)")
             return
+        opts, (host_id, alias) = res
+        from cli import save_selected_target
+        save_selected_target(host_id, alias)
+        self.selected_target["value"] = (host_id, alias)
         ok, msg = self.send_file_fn(path, host_id, alias, options=opts)
         log.info("send document %s -> %s @ %s: ok=%s msg=%r options=%r",
                  path, alias, host_id, ok, msg, opts)

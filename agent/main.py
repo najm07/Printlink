@@ -72,9 +72,13 @@ def _cmd_send(args) -> int:
         log.error("send: %s", err)
         print(f"[PrintLink] {err}", file=sys.stderr)
         return 2
+    rows = db.list_remote_printers(status="active")
+    printers = [(r["host_id"], r["printer_alias"]) for r in rows]
     target = resolve_send_target(db, args.target, {})
     if target is None:
         target = load_selected_target(db)
+    if printers and target not in printers:
+        target = printers[0]
     if target is None:
         target = pick_target_dialog(db)
         if target is not None:
@@ -84,11 +88,14 @@ def _cmd_send(args) -> int:
         print("[PrintLink] no target: select a remote printer in the tray "
               "or pass --target <host_id>", file=sys.stderr)
         return 2
-    host_id, alias = target
-    opts = ask_print_options(args.send, f"{alias} @ {host_id}")
-    if opts is None:
+    res = ask_print_options(args.send, printers or None, selected=target)
+    if res is None:
         log.info("send cancelled by user (preview dialog)")
         return 0
+    opts, target = res
+    host_id, alias = target
+    save_selected_target(host_id, alias)
+    log.info("send target (from dialog): %s @ %s", alias, host_id)
     discovery = Discovery(my_id, LISTEN_PORT, advertise=False)
     sender = Sender(db, my_id, socket.gethostname(), discovery.resolve)
     sender.on_delivered = lambda fp, hid, al: log.info(

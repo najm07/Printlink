@@ -1,68 +1,90 @@
 # PrintLink
 
-Peer-to-peer printer sharing for small offices — without Windows printer
-sharing. Print from any PC to a printer attached to another PC on the LAN,
-with per-PC access grants that expire automatically.
+Peer-to-peer LAN printer sharing for small offices — no Windows printer
+sharing, no cloud, no accounts. Print from any PC to a printer attached to
+another PC on the LAN, with per-PC access grants that expire automatically.
 
 ## How it works
 
-- Every PC runs the PrintLink tray agent (Python).
+- Every PC runs the PrintLink tray agent.
 - On the PC with the printer: share it under a friendly alias.
 - On any other PC: add a remote printer by entering that PC's 9-digit ID.
   The host gets an accept/refuse dialog. Access lasts 7 days (configurable)
   and can be revoked anytime.
-- Sender PCs also get a **"PrintLink Remote Printer"** in the Windows print
-  dialog. Pick your default remote printer in the tray, then print from any
-  application as usual.
+- Send a document with **right-click → "Print with PrintLink"** or the tray
+  menu → "Send document...". A preview dialog lets you pick the target
+  printer and print options before anything leaves your machine.
 
 ```
-App -> "PrintLink Remote Printer" (XPS driver)
-   -> spooler -> PrintLinkMonitor.dll
-   -> named pipe -> tray agent -> AES-GCM over HTTP :9100
-   -> host agent -> physical printer
+Your document -> preview dialog (printer, copies, pages, paper, color,
+                 duplex, orientation, fit)
+   -> sender agent -> AES-GCM over HTTP :9100 -> host agent -> printer
 ```
+
+No virtual printer and no port monitor: jobs are delivered directly between
+agents and handed to the physical printer by format:
+
+| Format        | Receiver handling                                   |
+| ------------- | --------------------------------------------------- |
+| PDF           | PyMuPDF page-range subset + SumatraPDF (or printto) |
+| Word (docx/doc)| Word COM automation (copies, page range)            |
+| Excel/PPTX    | shell printto verb                                  |
+| PNG/JPEG/GIF/BMP/WEBP/TIFF/EMF | GDI+ via PowerShell            |
+| Text          | spooler TEXT datatype                               |
 
 Jobs travel encrypted (AES-GCM keyed by the pairing token) directly PC-to-PC.
-No cloud, no server, no accounts.
 
 ## Repository layout
 
 ```
 agent/         Python tray agent (all PCs)
-port-monitor/  C++ port monitor + C# registrar (sender PCs)
-installer/     Inno Setup script (full / agent-only install types)
-docs/          architecture.md, protocol.md
+installer/     Inno Setup script (agent-only install)
+docs/          architecture.md, protocol.md, debugging-notes.md
 tests/         pytest suite
 ```
 
 ## Development setup
 
-```bash
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r agent/requirements.txt
 python agent/main.py
 ```
 
-Requires Windows for real use (pywin32, named pipes, port monitor). The share
-logic and HTTP API are platform-independent and tested on Linux.
+Requires Windows for real use (pywin32, spooler/COM/GDI+ printing). The
+share/identity logic and HTTP API are platform-independent and covered by
+tests that run on any OS.
 
 ## Testing
 
-```bash
-pip install pytest cryptography flask requests zeroconf
-python -m pytest tests/ -v
+```powershell
+python -m pytest tests/
 ```
 
 ## Building the installer
 
-1. `pyinstaller --onefile --noconsole --name PrintLinkAgent --icon installer/assets/icon.ico agent/main.py`
-2. Build `PrintLinkMonitor.dll` (VS, x64 Release, links winspool.lib)
-3. Build `PrintLinkSetup.exe` (.NET Framework 4.8)
-4. `iscc installer/printlink.iss`
+1. Bundle the agent:
 
-## Firewall
+   ```powershell
+   python -m PyInstaller --noconfirm PrintLinkAgent.spec
+   ```
 
-The installer opens TCP 9100 (API) and UDP 5353 (mDNS) on the Private profile
-only. On domain networks, adjust via GPO.
+   Produces `dist\PrintLinkAgent.exe` (onefile, windowed, ~52 MB; the spec
+   pins the excludes so the build stays fast and small).
+
+2. Build the installer:
+
+   ```powershell
+   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\printlink.iss
+   ```
+
+   Produces `installer\output\PrintLinkSetup-<version>.exe`.
+
+The installer registers the tray agent at login, opens firewall rules for
+TCP 9100 (API) and UDP 5353 (mDNS) on the Private profile, and calls the
+agent's `--install-verbs` to add the right-click verb. On domain networks
+the firewall rules are per-PC; adjust via GPO.
 
 ## Security model
 
@@ -73,3 +95,12 @@ only. On domain networks, adjust via GPO.
 - `/ping` ID verification prevents stale-IP impersonation after DHCP churn.
 
 See `docs/protocol.md` for wire formats and `docs/architecture.md` for design.
+
+## Licensing
+
+PrintLink itself is MIT-licensed (see LICENSE). The preview thumbnails and
+PDF page-range rendering use **PyMuPDF, which is AGPL-3.0 / commercial dual
+license**. Anyone redistributing PrintLink commercially must swap in
+pypdfium2 or drop the preview (the receiver falls back to printing the whole
+file). Pillow (thumbnails) and PyInstaller (bundling) are similarly bundled
+under their respective licenses.

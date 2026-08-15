@@ -26,6 +26,37 @@ def test_pages_invalid():
     assert parse_page_spec("x-y", 10) is None
 
 
+def test_preview_sniff_docx(tmp_path):
+    from preview import _sniff_head
+    p = tmp_path / "d.docx"
+    p.write_bytes(_zip({"[Content_Types].xml": b"<x/>",
+                        "word/document.xml": b"<w/>"}))
+    assert _sniff_head(str(p)) == "docx"
+
+
+def test_preview_sniff_png_head_only(tmp_path):
+    from preview import _sniff_head
+    p = tmp_path / "p.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32 + b"x" * 100_000)
+    assert _sniff_head(str(p)) == "png"
+
+
+def test_normalize_page_spec():
+    from preview import normalize_page_spec
+    assert normalize_page_spec("1-3, 5") == "1-3,5"
+    assert normalize_page_spec("1-3", 5) == "1-3"
+    assert normalize_page_spec("2") == "2"
+    import pytest
+    with pytest.raises(ValueError):
+        normalize_page_spec("3-1")
+    with pytest.raises(ValueError):
+        normalize_page_spec("1-9", 5)
+    with pytest.raises(ValueError):
+        normalize_page_spec("0")
+    with pytest.raises(ValueError):
+        normalize_page_spec("x")
+
+
 def _zip(pairs: dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
