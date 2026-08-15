@@ -2,11 +2,31 @@
 import io
 import sys
 import zipfile
+import pytest
 
 sys.path.insert(0, "agent")  # real printer_local, not the test_api stub
 sys.modules.pop("printer_local", None)
 
 from printer_local import sniff_format, parse_page_spec
+
+
+def test_print_pdf_page_range_subset_path(tmp_path, monkeypatch):
+    """Regression: print_pdf's PyMuPDF subset path must reach Sumatra lookup
+    (it once died on 'name 'tempfile' is not defined' before printing)."""
+    import pymupdf
+    from printer_local import print_pdf
+    pdf = tmp_path / "p.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page()
+        doc.new_page()
+        doc.save(pdf)
+
+    def boom(*a, **k):
+        raise AssertionError("reached _find_sumatra (subset path OK)")
+
+    monkeypatch.setattr("printer_local._find_sumatra", boom)
+    with pytest.raises(AssertionError, match="reached _find_sumatra"):
+        print_pdf(str(pdf), "Fake Printer", {"pages": "1"})
 
 
 def test_pages_all():
@@ -55,6 +75,13 @@ def test_normalize_page_spec():
         normalize_page_spec("0")
     with pytest.raises(ValueError):
         normalize_page_spec("x")
+
+
+def test_preview_printer_labels():
+    from preview import PreviewDialog
+    assert PreviewDialog._printer_label(("656055745", "IT", "Reception Canon")) == "IT @ Reception Canon"
+    assert PreviewDialog._printer_label(("656055745", "IT")) == "IT @ 656055745"
+    assert PreviewDialog._printer_label(("656055745", "IT", None)) == "IT @ 656055745"
 
 
 def _zip(pairs: dict[str, bytes]) -> bytes:

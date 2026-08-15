@@ -10,7 +10,11 @@ another PC on the LAN, with per-PC access grants that expire automatically.
 - On the PC with the printer: share it under a friendly alias.
 - On any other PC: add a remote printer by entering that PC's 9-digit ID.
   The host gets an accept/refuse dialog. Access lasts 7 days (configurable)
-  and can be revoked anytime.
+  and can be revoked anytime. When you add a printer you give it a friendly
+  name (shown as `alias @ name`, e.g. `CANON @ Lina's PC`), so the lists stay
+  readable even with many printers — rename or remove entries any time from
+  "Manage remote printers..." (removing also tells the host to revoke your
+  grant).
 - Send a document with **right-click → "Print with PrintLink"** or the tray
   menu → "Send document...". A preview dialog lets you pick the target
   printer and print options before anything leaves your machine.
@@ -89,10 +93,14 @@ the firewall rules are per-PC; adjust via GPO.
 ## Security model
 
 - Host-controlled access: nothing prints without an accepted grant.
-- Grants: 7-day expiry by default, hourly enforcement, manual revocation.
+- Grants: 7-day expiry by default, hourly enforcement, manual revocation or
+  extension ("Manage grants..." on the host).
 - Pairing token (64 hex chars) = auth credential + encryption key.
 - Payloads encrypted AES-256-GCM; tampering fails decryption.
 - `/ping` ID verification prevents stale-IP impersonation after DHCP churn.
+- `POST /revoke-grant` lets a remote revoke its own access (token-verified,
+  so nobody can cut someone else's grant); unsharing a printer revokes all
+  its grants.
 
 See `docs/protocol.md` for wire formats and `docs/architecture.md` for design.
 

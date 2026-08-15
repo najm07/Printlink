@@ -55,6 +55,28 @@ def revoke_grant(db: Database, grant_id: int) -> None:
     db.set_grant_status(grant_id, "revoked")
 
 
+def extend_grant(db: Database, grant_id: int, days: int = DEFAULT_SHARE_DAYS) -> str:
+    """Re-activate a grant and push its expiry out by `days`. Returns new expiry."""
+    expires = _utcnow() + timedelta(days=days)
+    with db.connect() as con:
+        con.execute("UPDATE grants SET expires_at = ?, status = 'active' WHERE id = ?",
+                    (_fmt(expires), grant_id))
+    return _fmt(expires)
+
+
+def revoke_remote_share(db: Database, remote_id: str, printer_alias: str,
+                        token: str) -> dict:
+    """Called by POST /revoke-grant: the remote PC asks us to drop its grant.
+    Token is verified so nobody can revoke someone else's access."""
+    grant = db.find_grant_by_remote_and_alias(normalize_id(remote_id), printer_alias)
+    if grant is None:
+        return {"ok": False, "error": "no grant for this ID and printer"}
+    if grant["token"] != token:
+        return {"ok": False, "error": "token mismatch"}
+    db.set_grant_status(grant["id"], "revoked")
+    return {"ok": True}
+
+
 def sweep_expired_grants(db: Database) -> int:
     """Hourly background job: mark overdue grants expired. Returns count updated."""
     expired = [g for g in db.list_grants("active")
@@ -67,10 +89,12 @@ def sweep_expired_grants(db: Database) -> int:
 # ---------- client side ----------
 
 def store_accepted_share(db: Database, host_id: str, host_name: str, host_ip: str,
-                         printer_alias: str, token: str, expires_at: str) -> None:
+                         printer_alias: str, token: str, expires_at: str,
+                         name: str | None = None) -> None:
     """Called when the host accepts our request and replies with a token."""
     db.upsert_remote_printer(normalize_id(host_id), printer_alias, token,
-                             expires_at, host_ip=host_ip, host_name=host_name)
+                             expires_at, host_ip=host_ip, host_name=host_name,
+                             name=name)
 
 
 def get_usable_printer(db: Database, host_id: str, printer_alias: str) -> dict:

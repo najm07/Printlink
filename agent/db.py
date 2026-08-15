@@ -9,6 +9,16 @@ import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
 
+
+def remote_label(row) -> str:
+    """Human label for a remote_printers row: '<alias> @ <name>' when the
+    user named the receiver, else the classic '<alias> @ <host_id>'."""
+    name = row["name"]
+    if name:
+        return f"{row['printer_alias']} @ {name}"
+    return f"{row['printer_alias']} @ {row['host_id']}"
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS shared_printers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,6 +48,7 @@ CREATE TABLE IF NOT EXISTS remote_printers (
     host_ip TEXT,                      -- last known IP (refreshed via mDNS)
     host_port INTEGER NOT NULL DEFAULT 9100,
     printer_alias TEXT NOT NULL,
+    name TEXT,                           -- user-defined display name (client-side)
     token TEXT NOT NULL,               -- token the host issued to us
     granted_at TEXT NOT NULL DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
@@ -52,6 +63,10 @@ class Database:
         self.db_path = str(db_path)
         with self.connect() as con:
             con.executescript(SCHEMA)
+            cols = {r[1] for r in con.execute("PRAGMA table_info(remote_printers)")}
+            if "name" not in cols:
+                con.execute("ALTER TABLE remote_printers ADD COLUMN name TEXT")
+                con.commit()
 
     @contextmanager
     def connect(self):
@@ -79,6 +94,17 @@ class Database:
         with self.connect() as con:
             return con.execute(q).fetchall()
 
+    def update_shared_printer_alias(self, printer_id: int, alias: str) -> None:
+        with self.connect() as con:
+            con.execute("UPDATE shared_printers SET alias = ? WHERE id = ?",
+                        (alias, printer_id))
+
+    def delete_shared_printer(self, printer_id: int) -> bool:
+        """Unshare a printer; its grants cascade-delete (ON DELETE CASCADE)."""
+        with self.connect() as con:
+            cur = con.execute("DELETE FROM shared_printers WHERE id = ?", (printer_id,))
+            return cur.rowcount > 0
+
     # ---- host side: grants to remote PCs ----
     def upsert_grant(self, remote_id, printer_id, token, expires_at, remote_name=None) -> None:
         with self.connect() as con:
@@ -97,6 +123,14 @@ class Database:
                 "SELECT * FROM grants WHERE remote_id = ? AND token = ?",
                 (remote_id, token)).fetchone()
 
+    def find_grant_by_remote_and_alias(self, remote_id: str, printer_alias: str) -> sqlite3.Row | None:
+        with self.connect() as con:
+            return con.execute(
+                """SELECT g.*, p.alias AS printer_alias
+                   FROM grants g JOIN shared_printers p ON p.id = g.printer_id
+                   WHERE g.remote_id = ? AND p.alias = ?""",
+                (remote_id, printer_alias)).fetchone()
+
     def set_grant_status(self, grant_id: int, status: str) -> None:
         with self.connect() as con:
             con.execute("UPDATE grants SET status = ? WHERE id = ?", (status, grant_id))
@@ -112,18 +146,32 @@ class Database:
 
     # ---- client side: remote printers we can use ----
     def upsert_remote_printer(self, host_id, printer_alias, token, expires_at,
-                              host_ip=None, host_name=None, host_port=9100) -> None:
+                              host_ip=None, host_name=None, host_port=9100,
+                              name=None) -> None:
         with self.connect() as con:
             con.execute(
                 """INSERT INTO remote_printers
-                       (host_id, host_name, host_ip, host_port, printer_alias, token, expires_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                       (host_id, host_name, host_ip, host_port, printer_alias, name, token, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(host_id, printer_alias) DO UPDATE SET
                        token=excluded.token, expires_at=excluded.expires_at,
                        host_ip=excluded.host_ip, host_name=excluded.host_name,
                        host_port=excluded.host_port,
                        granted_at=datetime('now'), status='active'""",
-                (host_id, host_name, host_ip, host_port, printer_alias, token, expires_at))
+                (host_id, host_name, host_ip, host_port, printer_alias, name,
+                 token, expires_at))
+
+    def set_remote_printer_name(self, host_id: str, printer_alias: str,
+                                name: str | None) -> None:
+        with self.connect() as con:
+            con.execute("UPDATE remote_printers SET name = ? WHERE host_id = ? AND printer_alias = ?",
+                        (name, host_id, printer_alias))
+
+    def delete_remote_printer(self, host_id: str, printer_alias: str) -> bool:
+        with self.connect() as con:
+            cur = con.execute("DELETE FROM remote_printers WHERE host_id = ? AND printer_alias = ?",
+                              (host_id, printer_alias))
+            return cur.rowcount > 0
 
     def get_remote_printer(self, host_id: str, printer_alias: str) -> sqlite3.Row | None:
         with self.connect() as con:

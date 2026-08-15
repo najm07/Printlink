@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from db import Database
 from shares import (create_grant, authorize_print, revoke_grant,
-                    sweep_expired_grants, store_accepted_share, get_usable_printer)
+                    sweep_expired_grants, store_accepted_share,
+                    get_usable_printer, extend_grant, revoke_remote_share)
 
 EXP = "%Y-%m-%d %H:%M:%S"
 
@@ -68,3 +69,35 @@ def test_client_side_checks(tmp_path):
     past = (_utcnow() - timedelta(days=1)).strftime(EXP)
     store_accepted_share(db, "777 888 999", "Host-PC", "192.168.1.50", "Office-HP", "tok", past)
     assert get_usable_printer(db, "777 888 999", "Office-HP")["error"].startswith("share expired")
+
+
+def test_store_accepted_share_with_name(tmp_path):
+    db = Database(tmp_path / "t.db")
+    exp = (_utcnow() + timedelta(days=7)).strftime(EXP)
+    store_accepted_share(db, "777 888 999", "Host-PC", "192.168.1.50",
+                         "Office-HP", "tok", exp, name="Reception Canon")
+    rp = db.get_remote_printer("777888999", "Office-HP")
+    assert rp["name"] == "Reception Canon"
+
+
+def test_extend_grant_reactivates(tmp_path):
+    db = Database(tmp_path / "t.db")
+    pid = db.add_shared_printer("HP", "a")
+    past = (_utcnow() - timedelta(days=2)).strftime(EXP)
+    db.upsert_grant("111222333", pid, "tok", past)
+    g = db.list_grants()[0]
+    assert authorize_print(db, "111222333", "tok")["error"].startswith("share expired")
+    new_expiry = extend_grant(db, g["id"], 30)
+    assert new_expiry > past
+    assert authorize_print(db, "111222333", "tok")["ok"]
+    assert db.list_grants()[0]["expires_at"] == new_expiry
+
+
+def test_revoke_remote_share(tmp_path):
+    db = Database(tmp_path / "t.db")
+    pid = db.add_shared_printer("HP", "Accounting-HP")
+    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00")
+    assert revoke_remote_share(db, "111222333", "Accounting-HP", "wrong")["error"] == "token mismatch"
+    assert revoke_remote_share(db, "111222333", "Ghost", "tok")["error"].startswith("no grant")
+    assert revoke_remote_share(db, "111222333", "Accounting-HP", "tok")["ok"]
+    assert db.list_grants()[0]["status"] == "revoked"

@@ -73,12 +73,17 @@ def _cmd_send(args) -> int:
         print(f"[PrintLink] {err}", file=sys.stderr)
         return 2
     rows = db.list_remote_printers(status="active")
-    printers = [(r["host_id"], r["printer_alias"]) for r in rows]
+    printers = [(r["host_id"], r["printer_alias"], r["name"]) for r in rows]
     target = resolve_send_target(db, args.target, {})
     if target is None:
         target = load_selected_target(db)
-    if printers and target not in printers:
-        target = printers[0]
+    pairs = [(p[0], p[1]) for p in printers]
+    if target is not None and target not in pairs:
+        log.info("target %s @ %s no longer active; defaulting to first printer",
+                 target[0], target[1])
+        target = None
+    if target is None and printers:
+        target = printers[0][:2]
     if target is None:
         target = pick_target_dialog(db)
         if target is not None:
@@ -199,7 +204,8 @@ def _cmd_tray() -> None:
 
     tray = PrintLinkTray(db, my_id, sender.request_share, on_quit,
                          selected_target=selected_target,
-                         send_file_fn=sender.print_file)
+                         send_file_fn=sender.print_file,
+                         revoke_fn=sender.revoke_share)
     tray_holder["tray"] = tray
 
     try:

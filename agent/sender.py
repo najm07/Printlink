@@ -86,7 +86,8 @@ class Sender:
         return None
 
     # ---------- share request ----------
-    def request_share(self, host_id: str, printer_alias: str, days: int) -> tuple[bool, str]:
+    def request_share(self, host_id: str, printer_alias: str, days: int,
+                      name: str | None = None) -> tuple[bool, str]:
         if not is_valid_id(host_id):
             log.warning("request_share: invalid ID %r", host_id)
             return False, "Invalid ID format."
@@ -114,12 +115,36 @@ class Sender:
         if r.status_code == 200 and j.get("status") == "accepted":
             ip = base.split("//")[1].split(":")[0]
             store_accepted_share(self.db, host_id, "", ip, printer_alias,
-                                 j["token"], j["expires_at"])
+                                 j["token"], j["expires_at"], name=name)
             log.info("request_share: ACCEPTED for %s (%s) token saved", host_id, printer_alias)
             return True, f"Access granted until {j['expires_at']}."
         log.warning("request_share: refused by %s: %s", host_id,
                     j.get("reason", r.status_code))
         return False, f"Refused: {j.get('reason', r.status_code)}"
+
+    def revoke_share(self, host_id: str, printer_alias: str) -> tuple[bool, str]:
+        """Best-effort: ask the host to drop our grant (used when the user
+        removes a remote printer). Never blocks the UI for long."""
+        rp = next((r for r in self.db.list_remote_printers(status=None)
+                   if r["host_id"] == host_id
+                   and r["printer_alias"] == printer_alias), None)
+        if rp is None:
+            return False, "printer not in list"
+        base = self._base_url(host_id)
+        if base is None:
+            return False, "host unreachable — local entry removed anyway"
+        try:
+            r = requests.post(f"{base}/revoke-grant", json={
+                "sender_id": self.my_id, "printer_alias": printer_alias,
+                "token": rp["token"]}, timeout=CONNECT_TIMEOUT_S)
+            log.info("revoke_share %s '%s': HTTP %d", host_id, printer_alias,
+                     r.status_code)
+            if r.status_code == 200:
+                return True, "host grant revoked"
+            return False, f"host said {r.status_code}"
+        except requests.RequestException as e:
+            log.warning("revoke_share failed for %s: %r", host_id, e)
+            return False, f"host unreachable: {e}"
 
     # ---------- printing ----------
     def print_file(self, filepath: str | Path, host_id: str, printer_alias: str,

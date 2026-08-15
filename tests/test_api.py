@@ -87,6 +87,24 @@ def test_decline_403(tmp_path):
     assert r.status_code == 403
 
 
+def test_revoke_grant(env):
+    client, db = env
+    token = request_share(client).get_json()["token"]
+    r = client.post("/revoke-grant",
+                    json={"sender_id": "111 222 333", "printer_alias": "Ghost",
+                          "token": token})
+    assert r.status_code == 404
+    r = client.post("/revoke-grant",
+                    json={"sender_id": "111 222 333", "printer_alias": "Accounting-HP",
+                          "token": "wrong"})
+    assert r.status_code == 404
+    r = client.post("/revoke-grant",
+                    json={"sender_id": "111 222 333", "printer_alias": "Accounting-HP",
+                          "token": token})
+    assert r.status_code == 200 and r.get_json()["status"] == "revoked"
+    assert db.list_grants()[0]["status"] == "revoked"
+
+
 def test_bad_token_403(env):
     client, _ = env
     assert do_print(client, "wrong").status_code == 403

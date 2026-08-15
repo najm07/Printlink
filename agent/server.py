@@ -17,7 +17,7 @@ from flask import Flask, request, jsonify
 from cryptography.exceptions import InvalidTag
 
 from db import Database
-from shares import create_grant, authorize_print, DEFAULT_SHARE_DAYS
+from shares import create_grant, authorize_print, revoke_remote_share, DEFAULT_SHARE_DAYS
 from printer_local import (list_printers, printer_status, print_via_shell,
                            print_text, print_emf, print_word, print_image,
                            print_pdf, sniff_format, extract_emf,
@@ -94,6 +94,21 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
                  sender_id, alias, grant["expires_at"])
         return jsonify({"status": "accepted", "token": grant["token"],
                         "expires_at": grant["expires_at"]})
+
+    @app.post("/revoke-grant")
+    def revoke_grant():
+        data = request.get_json(force=True)
+        sender_id = normalize_id(data.get("sender_id", ""))
+        alias = data.get("printer_alias", "")
+        token = data.get("token", "")
+        log.info("POST /revoke-grant from %s for '%s'", request.remote_addr, alias)
+        res = revoke_remote_share(db, sender_id, alias, token)
+        if not res["ok"]:
+            log.warning("revoke-grant FAILED for %s '%s': %s",
+                        sender_id, alias, res["error"])
+            return jsonify({"status": "refused", "reason": res["error"]}), 404
+        log.info("revoke-grant OK: %s no longer has '%s'", sender_id, alias)
+        return jsonify({"status": "revoked"})
 
     @app.post("/print")
     def receive_print():

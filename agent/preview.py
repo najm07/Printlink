@@ -308,14 +308,17 @@ class PreviewDialog:
         self.printer_var = tk.StringVar(self.top)
         self._printer_map: dict[str, tuple[str, str]] = {}
         if self._printers:
-            default = self._selected if self._selected in self._printers \
-                else self._printers[0]
+            default = self._printers[0]
+            if self._selected:
+                default = next((p for p in self._printers
+                                if p[0] == self._selected[0]
+                                and p[1] == self._selected[1]), default)
             entries = []
-            for host_id, alias in self._printers:
-                label = f"{alias} @ {host_id}"
+            for p in self._printers:
+                label = self._printer_label(p)
                 entries.append(label)
-                self._printer_map[label] = (host_id, alias)
-            self.printer_var.set(f"{default[1]} @ {default[0]}")
+                self._printer_map[label] = (p[0], p[1])
+            self.printer_var.set(self._printer_label(default))
             ttk.Combobox(header, textvariable=self.printer_var,
                          values=entries, state="readonly",
                          width=30).grid(row=0, column=1, sticky="w",
@@ -413,6 +416,13 @@ class PreviewDialog:
             x = (self.top.winfo_screenwidth() - w) // 2
             y = (self.top.winfo_screenheight() - h) // 3
         self.top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    @staticmethod
+    def _printer_label(p: tuple) -> str:
+        name = p[2] if len(p) > 2 else None
+        if name:
+            return f"{p[1]} @ {name}"
+        return f"{p[1]} @ {p[0]}"
 
     def _chosen_printer(self) -> tuple[str, str]:
         label = self.printer_var.get()

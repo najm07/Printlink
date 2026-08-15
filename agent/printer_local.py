@@ -5,6 +5,7 @@ which works for PDF (Edge/Adobe/Sumatra registered handler) and images
 (Photos/mspaint). Raw data path is provided for future ESC/POS needs.
 """
 import os
+import tempfile
 import time
 import win32print
 import win32api

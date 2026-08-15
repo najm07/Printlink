@@ -11,7 +11,7 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
-from db import Database
+from db import Database, remote_label
 from printer_local import list_printers
 from shares import DEFAULT_SHARE_DAYS
 from logutil import get_logger
@@ -55,17 +55,21 @@ def _notify(title: str, msg: str):
 
 class PrintLinkTray:
     def __init__(self, db: Database, my_id: str, send_request_fn, on_quit_fn,
-                 selected_target: dict | None = None, send_file_fn=None):
-        """send_request_fn(host_id, printer_alias, days) -> (ok, message)
+                 selected_target: dict | None = None, send_file_fn=None,
+                 revoke_fn=None):
+        """send_request_fn(host_id, printer_alias, days, name) -> (ok, message)
         on_quit_fn() -> cleanup hook from main.py
         selected_target: {"value": (host_id, printer_alias)} shared with the
         pipe reader so port-monitor jobs go to the user's chosen printer.
-        send_file_fn(filepath, host_id, printer_alias) -> (ok, message): direct
-        file send (no Windows spooler involved)."""
+        send_file_fn(filepath, host_id, printer_alias, options=) -> (ok, message):
+        direct file send (no Windows spooler involved).
+        revoke_fn(host_id, printer_alias) -> (ok, message): best-effort host-side
+        grant revocation used when the user removes a remote printer."""
         self.db, self.my_id = db, my_id
         self.send_request_fn = send_request_fn
         self.on_quit_fn = on_quit_fn
         self.send_file_fn = send_file_fn
+        self.revoke_fn = revoke_fn
         self.selected_target = selected_target if selected_target is not None else {}
         self.icon = pystray.Icon("PrintLink", _default_icon(), "PrintLink",
                                  self._menu())
@@ -85,7 +89,14 @@ class PrintLinkTray:
     # ---- menu actions ----
     def _target_label(self) -> str:
         t = self.selected_target.get("value")
-        return f"{t[1]} @ {t[0]}" if t else "None (jobs discarded)"
+        if not t:
+            return "None (jobs discarded)"
+        row = None
+        try:
+            row = self.db.get_remote_printer(t[0], t[1])
+        except Exception as e:
+            log.warning("target label lookup failed: %r", e)
+        return remote_label(row) if row is not None else f"{t[1]} @ {t[0]}"
 
     def _menu(self):
         return pystray.Menu(
@@ -95,12 +106,14 @@ class PrintLinkTray:
             pystray.MenuItem("Send document...", self._send_document),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Share a printer...", self._share_printer),
-            pystray.MenuItem("Active grants / revoke...", self._manage_grants),
+            pystray.MenuItem("My shared printers...", self._manage_shared),
+            pystray.MenuItem("Manage grants...", self._manage_grants),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Add remote printer by ID...", self._add_remote),
             pystray.MenuItem(f"Remote target: {self._target_label()}",
                              lambda *_: None, enabled=False),
             pystray.MenuItem("Select remote printer...", self._select_target),
+            pystray.MenuItem("Manage remote printers...", self._manage_remotes),
             pystray.MenuItem("My remote printers", self._list_remotes),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
@@ -126,13 +139,13 @@ class PrintLinkTray:
                 return
         host_id, alias = target
         rows = self.db.list_remote_printers(status="active")
-        printers = [(r["host_id"], r["printer_alias"]) for r in rows]
+        printers = [(r["host_id"], r["printer_alias"], r["name"]) for r in rows]
         if not printers:
             _notify("PrintLink", "No active remote printers. Add one first via "
                                   "'Add remote printer by ID...'.")
             return
         if (host_id, alias) not in printers:
-            host_id, alias = printers[0]
+            host_id, alias = printers[0][:2]
         from preview import ask_print_options
         res = _dialog(lambda root: ask_print_options(path, printers,
                                                      selected=(host_id, alias),
@@ -150,13 +163,21 @@ class PrintLinkTray:
         _notify("PrintLink", msg if ok else f"Failed: {msg}")
 
     def on_delivered(self, filepath: str, host_id: str, printer_alias: str):
-        _notify("PrintLink",
-                f"'{Path(filepath).name}' printed on {printer_alias} @ {host_id}.")
+        label = self._lookup_label(host_id, printer_alias)
+        _notify("PrintLink", f"'{Path(filepath).name}' printed on {label}.")
 
     def on_failed(self, filepath: str, host_id: str, printer_alias: str):
+        label = self._lookup_label(host_id, printer_alias)
         _notify("PrintLink",
-                f"Failed to print '{Path(filepath).name}' "
-                f"after retries ({printer_alias} @ {host_id}).")
+                f"Failed to print '{Path(filepath).name}' after retries ({label}).")
+
+    def _lookup_label(self, host_id: str, printer_alias: str) -> str:
+        try:
+            row = self.db.get_remote_printer(host_id, printer_alias)
+        except Exception as e:
+            log.warning("label lookup failed for %s: %r", host_id, e)
+            row = None
+        return remote_label(row) if row is not None else f"{printer_alias} @ {host_id}"
 
     def _select_target(self, *_):
         rows = self.db.list_remote_printers(status="active")
@@ -170,8 +191,7 @@ class PrintLinkTray:
             win.attributes("-topmost", True)
             lb = tk.Listbox(win, width=70)
             for r in rows:
-                lb.insert("end", f"{r['printer_alias']} @ {r['host_id']}"
-                                 f" ({r['host_ip'] or 'unknown IP'})")
+                lb.insert("end", f"{remote_label(r)} ({r['host_ip'] or 'unknown IP'})")
             lb.pack(padx=8, pady=8)
             out = {}
             def ok():
@@ -191,7 +211,7 @@ class PrintLinkTray:
             save_selected_target(*picked)  # so one-shot --send can use it too
             log.info("remote target selected: %s @ %s", picked[1], picked[0])
             self.icon.menu = self._menu()  # refresh the disabled label row
-            _notify("PrintLink", f"Remote printer set to {picked[1]} @ {picked[0]}.")
+            _notify("PrintLink", f"Remote printer set to {self._lookup_label(*picked)}.")
 
     def _copy_id(self, *_):
         _dialog(lambda root: (root.clipboard_clear(),
@@ -228,22 +248,117 @@ class PrintLinkTray:
             grants = self.db.list_grants()
             if not grants:
                 messagebox.showinfo("PrintLink", "No grants yet."); return None
-            win = tk.Toplevel(root); win.title("Grants"); win.attributes("-topmost", True)
-            lb = tk.Listbox(win, width=70)
+            win = tk.Toplevel(root); win.title("Manage grants"); win.attributes("-topmost", True)
+            lb = tk.Listbox(win, width=74)
             for g in grants:
                 lb.insert("end", f"[{g['status']}] {g['remote_id']} ({g['remote_name']}) → "
                                  f"{g['printer_alias']} until {g['expires_at']}")
             lb.pack(padx=8, pady=8)
+            out = {}
+
+            def done(action, value=None):
+                out["a"], out["v"] = action, value
+                win.destroy()
+
             def revoke():
-                if lb.curselection():
-                    g = grants[lb.curselection()[0]]
-                    from shares import revoke_grant
-                    revoke_grant(self.db, g["id"])
-                    win.destroy()
-            tk.Button(win, text="Revoke selected", command=revoke).pack(pady=6)
+                sel = lb.curselection()
+                if sel:
+                    g = grants[sel[0]]
+                    if messagebox.askyesno("PrintLink",
+                                           f"Revoke {g['remote_id']}'s access to "
+                                           f"'{g['printer_alias']}'?"):
+                        done("revoke", g["id"])
+
+            def extend():
+                sel = lb.curselection()
+                if sel:
+                    g = grants[sel[0]]
+                    days = simpledialog.askinteger(
+                        "PrintLink", f"Extend access for {g['remote_id']} "
+                                     f"(days):", initialvalue=DEFAULT_SHARE_DAYS,
+                        minvalue=1, maxvalue=365)
+                    if days:
+                        done("extend", (g["id"], days))
+
+            btns = tk.Frame(win)
+            tk.Button(btns, text="Revoke selected", command=revoke).pack(side="left", padx=4)
+            tk.Button(btns, text="Extend selected...", command=extend).pack(side="left", padx=4)
+            tk.Button(btns, text="Close", command=lambda: done("close")).pack(side="left", padx=4)
+            btns.pack(pady=6)
             win.wait_window()
-            return None
-        _dialog(ui)
+            return out.get("a"), out.get("v")
+
+        action, value = _dialog(ui)
+        if not action or action == "close":
+            return
+        if action == "revoke":
+            from shares import revoke_grant
+            revoke_grant(self.db, value)
+            _notify("PrintLink", "Grant revoked.")
+            return
+        if action == "extend":
+            grant_id, days = value
+            from shares import extend_grant
+            new_expiry = extend_grant(self.db, grant_id, days)
+            _notify("PrintLink", f"Access extended until {new_expiry}.")
+
+    def _manage_shared(self, *_):
+        def ui(root):
+            shared = self.db.list_shared_printers(enabled_only=False)
+            if not shared:
+                messagebox.showinfo("PrintLink", "No shared printers yet. Use "
+                                                 "'Share a printer...'.")
+                return None
+            win = tk.Toplevel(root); win.title("My shared printers")
+            win.attributes("-topmost", True)
+            lb = tk.Listbox(win, width=74)
+            for p in shared:
+                lb.insert("end", f"{p['alias']} → {p['local_name']}"
+                                 f" ({'enabled' if p['enabled'] else 'disabled'})")
+            lb.pack(padx=8, pady=8)
+            out = {}
+
+            def done(action, value=None):
+                out["a"], out["v"] = action, value
+                win.destroy()
+
+            def rename():
+                sel = lb.curselection()
+                if sel:
+                    p = shared[sel[0]]
+                    done("rename", p["id"])
+
+            def unshare():
+                sel = lb.curselection()
+                if sel:
+                    p = shared[sel[0]]
+                    if messagebox.askyesno(
+                            "PrintLink",
+                            f"Unshare '{p['alias']}'?\n"
+                            "Everyone's access to this printer will be revoked."):
+                        done("unshare", p["id"])
+
+            btns = tk.Frame(win)
+            tk.Button(btns, text="Rename alias...", command=rename).pack(side="left", padx=4)
+            tk.Button(btns, text="Unshare", command=unshare).pack(side="left", padx=4)
+            tk.Button(btns, text="Close", command=lambda: done("close")).pack(side="left", padx=4)
+            btns.pack(pady=6)
+            win.wait_window()
+            return out.get("a"), out.get("v")
+
+        action, value = _dialog(ui)
+        if not action or action == "close":
+            return
+        if action == "rename":
+            alias = _dialog(lambda root: simpledialog.askstring(
+                "PrintLink", "New alias (remote users will see this):"))
+            if alias and alias.strip():
+                self.db.update_shared_printer_alias(value, alias.strip())
+                _notify("PrintLink", f"Alias updated to '{alias.strip()}'.")
+            return
+        if action == "unshare":
+            self.db.delete_shared_printer(value)
+            _notify("PrintLink", "Printer unshared (all grants revoked).")
 
     def _add_remote(self, *_):
         host_id = _dialog(lambda root: simpledialog.askstring(
@@ -254,18 +369,100 @@ class PrintLinkTray:
             "PrintLink", "Printer alias on that host (e.g. Accounting-HP):"))
         if not alias:
             return
+        name = _dialog(lambda root: simpledialog.askstring(
+            "PrintLink", "Name of this receiver (shown as 'CANON @ <name>', "
+                         "e.g. Lina's PC):", initialvalue=alias))
+        if name is None:
+            return
+        name = name.strip() or None
         days = _dialog(lambda root: simpledialog.askinteger(
             "PrintLink", "Days of access:", initialvalue=DEFAULT_SHARE_DAYS,
             minvalue=1, maxvalue=90)) or DEFAULT_SHARE_DAYS
-        ok, msg = self.send_request_fn(host_id, alias, days)
-        log.info("add-remote %s@%s for %d days -> ok=%s msg=%r",
-                 alias, host_id, days, ok, msg)
+        ok, msg = self.send_request_fn(host_id, alias, days, name)
+        log.info("add-remote %s@%s for %d days (name=%r) -> ok=%s msg=%r",
+                 alias, host_id, days, name, ok, msg)
         _notify("PrintLink", msg)
+
+    def _manage_remotes(self, *_):
+        rows = self.db.list_remote_printers(status="active")
+        if not rows:
+            _notify("PrintLink", "No active remote printers. Add one first via "
+                                 "'Add remote printer by ID...'.")
+            return
+
+        def ui(root):
+            win = tk.Toplevel(root); win.title("Manage remote printers")
+            win.attributes("-topmost", True)
+            lb = tk.Listbox(win, width=74)
+            for r in rows:
+                lb.insert("end", f"{remote_label(r)} ({r['host_ip'] or 'unknown IP'})")
+            lb.pack(padx=8, pady=8)
+            out = {}
+
+            def done(action, value=None):
+                out["a"], out["v"] = action, value
+                win.destroy()
+
+            def rename():
+                sel = lb.curselection()
+                if sel:
+                    r = rows[sel[0]]
+                    done("rename", (r["host_id"], r["printer_alias"], r["name"]))
+
+            def remove():
+                sel = lb.curselection()
+                if sel:
+                    r = rows[sel[0]]
+                    label = remote_label(r)
+                    if messagebox.askyesno(
+                            "PrintLink",
+                            f"Remove '{label}'?\n"
+                            "The host will also be told to revoke your access."):
+                        done("remove", (r["host_id"], r["printer_alias"], label))
+
+            btns = tk.Frame(win)
+            tk.Button(btns, text="Rename...", command=rename).pack(side="left", padx=4)
+            tk.Button(btns, text="Remove", command=remove).pack(side="left", padx=4)
+            tk.Button(btns, text="Close", command=lambda: done("close")).pack(side="left", padx=4)
+            btns.pack(pady=6)
+            win.wait_window()
+            return out.get("a"), out.get("v")
+
+        action, value = _dialog(ui)
+        if not action or action == "close":
+            return
+        if action == "rename":
+            host_id, alias, old_name = value
+            new_name = _dialog(lambda root: simpledialog.askstring(
+                "PrintLink", "New name for this printer:", initialvalue=old_name or ""))
+            if new_name is None:
+                return
+            new_name = new_name.strip() or None
+            self.db.set_remote_printer_name(host_id, alias, new_name)
+            self.icon.menu = self._menu()
+            _notify("PrintLink",
+                    f"Renamed to {new_name or f'{alias} @ {host_id}'}.")
+            return
+        if action == "remove":
+            host_id, alias, label = value
+            self.db.delete_remote_printer(host_id, alias)
+            if self.selected_target.get("value") == (host_id, alias):
+                self.selected_target["value"] = None
+                from cli import clear_selected_target
+                clear_selected_target()
+            self.icon.menu = self._menu()
+            revoke_msg = ""
+            if self.revoke_fn is not None:
+                r_ok, r_msg = self.revoke_fn(host_id, alias)
+                revoke_msg = f"\nHost: {r_msg}" if not r_ok else ""
+                log.info("remove %s '%s' -> host revoke ok=%s msg=%r",
+                         host_id, alias, r_ok, r_msg)
+            _notify("PrintLink", f"'{label}' removed.{revoke_msg}")
 
     def _list_remotes(self, *_):
         rows = self.db.list_remote_printers(status=None)
-        text = "\n".join(f"[{r['status']}] {r['printer_alias']} @ {r['host_id']} "
-                          f"({r['host_ip']}) until {r['expires_at']}" for r in rows) or "None."
+        text = "\n".join(f"[{r['status']}] {remote_label(r)} "
+                         f"({r['host_ip']}) until {r['expires_at']}" for r in rows) or "None."
         _notify("PrintLink — my remote printers", text)
 
     def _quit(self, *_):

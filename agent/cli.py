@@ -96,6 +96,18 @@ def save_selected_target(host_id: str, printer_alias: str, path=None) -> None:
         log.warning("could not persist target to %s", p)
 
 
+def clear_selected_target(path=None) -> None:
+    """Drop the persisted target (e.g. the chosen printer was removed)."""
+    p = Path(path) if path else TARGET_FILE
+    try:
+        p.unlink()
+        log.info("cleared persisted target at %s", p)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        log.warning("could not remove %s", p)
+
+
 def load_selected_target(db, path=None) -> tuple[str, str] | None:
     """(host_id, alias) from disk if it still matches an ACTIVE remote printer."""
     import time
@@ -153,8 +165,9 @@ def pick_target_dialog(db) -> tuple[str, str] | None:
         win.title("Print with PrintLink")
         lb = tk.Listbox(win, width=72)
         for r in rows:
-            lb.insert("end", f"{r['printer_alias']} @ {r['host_id']} "
-                             f"({r['host_ip'] or 'unknown IP'})")
+            label = f"{r['printer_alias']} @ {r['name']}" if r["name"] \
+                else f"{r['printer_alias']} @ {r['host_id']}"
+            lb.insert("end", f"{label} ({r['host_ip'] or 'unknown IP'})")
         lb.pack(padx=8, pady=8)
 
         def ok(_=None):
