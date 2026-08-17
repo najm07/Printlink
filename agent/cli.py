@@ -24,24 +24,43 @@ def exe_command() -> str:
 
 
 def install_shell_verbs() -> None:
-    """Add 'Print with PrintLink' to the Explorer context menu for any file."""
+    """Add 'Print with PrintLink' to the Explorer context menu for any file.
+
+    Registered under HKLM (machine-wide) so every user account sees it —
+    the old per-user HKCU registration only landed in the elevating admin's
+    hive. Falls back to HKCU when not running elevated.
+    """
     import winreg
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, VERB_KEY) as k:
-        winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "Print with PrintLink")
-        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, f"{exe_command()},0")
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, VERB_KEY + r"\command") as k:
-        winreg.SetValueEx(k, None, 0, winreg.REG_SZ, f'{exe_command()} --send "%1"')
-    log.info("shell verb 'Print with PrintLink' installed for *")
+    for root, where in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"),
+                        (winreg.HKEY_CURRENT_USER, "HKCU")):
+        try:
+            with winreg.CreateKeyEx(root, VERB_KEY, 0, winreg.KEY_WRITE) as k:
+                winreg.SetValueEx(k, None, 0, winreg.REG_SZ, "Print with PrintLink")
+                winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, f"{exe_command()},0")
+            with winreg.CreateKeyEx(root, VERB_KEY + r"\command", 0,
+                                    winreg.KEY_WRITE) as k:
+                winreg.SetValueEx(k, None, 0, winreg.REG_SZ,
+                                  f'{exe_command()} --send "%1"')
+            log.info("shell verb 'Print with PrintLink' installed for * (%s)",
+                     where)
+            return
+        except (PermissionError, OSError):
+            log.warning("cannot write shell verb to %s (need admin?), "
+                        "trying per-user", where)
+    log.error("shell verb install FAILED (HKLM and HKCU both denied)")
 
 
 def uninstall_shell_verbs() -> None:
     import winreg
-    try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, VERB_KEY + r"\command")
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, VERB_KEY)
-        log.info("shell verb removed")
-    except FileNotFoundError:
-        pass
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            winreg.DeleteKey(root, VERB_KEY + r"\command")
+            winreg.DeleteKey(root, VERB_KEY)
+            log.info("shell verb removed from %s", root)
+        except FileNotFoundError:
+            pass
+        except (PermissionError, OSError) as e:
+            log.warning("could not remove verb from %s: %r", root, e)
 
 
 def resolve_send_target(db, host_id: str | None, selected: dict) -> tuple[str, str] | None:

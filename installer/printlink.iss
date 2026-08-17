@@ -9,7 +9,7 @@
 ; Build:  iscc printlink.iss
 
 #define MyAppName      "PrintLink"
-#define MyAppVersion   "0.2.1"
+#define MyAppVersion   "0.2.2"
 #define MyAppPublisher "PrintLink"
 #define MyAppExeName   "PrintLinkAgent.exe"
 
