@@ -43,9 +43,14 @@ Jobs travel encrypted (AES-GCM keyed by the pairing token) directly PC-to-PC.
 ```
 agent/         Python tray agent (all PCs)
 installer/     Inno Setup script (agent-only install)
-docs/          architecture.md, protocol.md, debugging-notes.md
+docs/          architecture.md, protocol.md, security.md, debugging-notes.md
 tests/         pytest suite
 ```
+
+`agent/pipe_reader.py` is legacy code from the retired port monitor: it is
+**not used by the shipping product**. It only activates if the agent is
+started with `LEGACY_PIPE_ENV=1` (see `main.py`); kept for anyone still
+running an old port monitor.
 
 ## Development setup
 
@@ -90,6 +95,11 @@ TCP 9100 (API) and UDP 5353 (mDNS) on the Private profile, and calls the
 agent's `--install-verbs` to add the right-click verb. On domain networks
 the firewall rules are per-PC; adjust via GPO.
 
+Since 0.2.3, agent data (printers, grants, tokens, identity) is shared
+machine-wide in `%PROGRAMDATA%\PrintLink` so every user account on a PC sees
+the same printers. This makes tokens readable by any local user — see
+`docs/security.md` for the threat model and planned hardening.
+
 ## Security model
 
 - Host-controlled access: nothing prints without an accepted grant.
@@ -102,7 +112,8 @@ the firewall rules are per-PC; adjust via GPO.
   so nobody can cut someone else's grant); unsharing a printer revokes all
   its grants.
 
-See `docs/protocol.md` for wire formats and `docs/architecture.md` for design.
+See `docs/protocol.md` for wire formats, `docs/architecture.md` for design,
+and `docs/security.md` for the threat model.
 
 ## Licensing
 

@@ -1,5 +1,6 @@
 pystray
 Pillow
+pymupdf
 flask
 requests
 zeroconf
