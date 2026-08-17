@@ -3,12 +3,13 @@
 PDFs/pictures are printed by delegating to the shell association ("printto"),
 which works for PDF (Edge/Adobe/Sumatra registered handler) and images
 (Photos/mspaint). Raw data path is provided for future ESC/POS needs.
+
+pywin32 is imported lazily inside the functions that need it so the module
+(and its pure functions) can be imported/tested on any OS.
 """
 import os
 import tempfile
 import time
-import win32print
-import win32api
 
 from logutil import get_logger
 
@@ -50,16 +51,19 @@ def parse_page_spec(spec: str, page_count: int) -> list[int] | None:
 
 def list_printers() -> list[str]:
     """All locally installed printers (USB, network, virtual)."""
+    import win32print
     flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
     return [p[2] for p in win32print.EnumPrinters(flags)]
 
 
 def default_printer() -> str:
+    import win32print
     return win32print.GetDefaultPrinter()
 
 
 def printer_status(printer_name: str) -> dict:
     """Online/offline/paused and job count for a given printer."""
+    import win32print
     h = win32print.OpenPrinter(printer_name)
     try:
         info = win32print.GetPrinter(h, 2)
@@ -86,6 +90,7 @@ def print_via_shell(filepath: str, printer_name: str, timeout: int = 120) -> Non
     XPS. PDFs/images take the dedicated option-aware paths instead.
     Raises RuntimeError if the handler doesn't exit in time.
     """
+    import win32api
     try:
         win32api.ShellExecute(0, "printto", os.path.abspath(filepath),
                               f'"{printer_name}"', ".", 0)
@@ -296,6 +301,7 @@ def print_word(filepath: str, printer_name: str, opts: dict | None = None,
 
 def print_raw(data: bytes, printer_name: str, job_name: str = "PrintLink Job") -> None:
     """Send raw bytes straight to the spooler (for future ESC/POS / ZPL)."""
+    import win32print
     h = win32print.OpenPrinter(printer_name)
     try:
         win32print.StartDocPrinter(h, 1, (job_name, None, "RAW"))
@@ -314,6 +320,7 @@ def print_text(data: bytes, printer_name: str, job_name: str = "PrintLink Job",
     Spooled data from a "Generic / Text Only" sender queue is raw text; the
     spooler's TEXT datatype renders it on any driver (LF -> CRLF, form feed).
     """
+    import win32print
     for _ in range(max(1, copies)):
         h = win32print.OpenPrinter(printer_name)
         try:

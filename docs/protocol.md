@@ -1,6 +1,6 @@
 # PrintLink Protocol Specification
 
-Wire contracts between PrintLink agents and between the port monitor and agent.
+Wire contracts between PrintLink agents.
 All multi-byte integers little-endian. All timestamps UTC `YYYY-MM-DD HH:MM:SS`.
 
 ## 1. mDNS advertisement
@@ -74,10 +74,13 @@ The host checks, in order: token known -> not revoked -> not expired (marks
 not offline -> decrypt -> spool -> reply. The reply is sent only after the job
 finishes printing locally, hence the 180s client read timeout.
 
-## 3. Named pipe framing (port monitor -> agent)
+## 3. Legacy: named pipe framing (retired)
 
-Pipe: `\\.\pipe\PrintLinkSender` (byte mode, inbound, unlimited instances).
-The monitor opens one connection per job and writes:
+The port monitor and its pipe (`\\.\pipe\PrintLinkSender`) were retired when
+PrintLink moved to direct send (0.2.0). This section documents the old framing
+for anyone running the legacy `pipe_reader.py` (`LEGACY_PIPE_ENV=1`).
+
+The monitor opened one connection per job and wrote:
 
 ```
 [4B  uint32  job-name length N]
@@ -86,10 +89,10 @@ The monitor opens one connection per job and writes:
 [...         payload bytes]             (XPS from the Microsoft driver)
 ```
 
-End of job = monitor closes its pipe handle. The agent saves the payload to
-`%TEMP%\printlink_outbox\<unixtime>_<rand>.<ext>` and enqueues it for the
-tray-selected default remote printer. If none is selected, the file is deleted
-and the job discarded.
+End of job = monitor closes its pipe handle. The agent saved the payload to
+`%TEMP%\printlink_outbox\<unixtime>_<rand>.<ext>` and enqueued it for the
+tray-selected default remote printer. If none was selected, the file was
+deleted and the job discarded. This path is not used by the current agent.
 
 ## 4. Pairing token
 

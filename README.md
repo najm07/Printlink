@@ -1,5 +1,7 @@
 # PrintLink
 
+[![CI](https://github.com/najm07/Printlink/actions/workflows/ci.yml/badge.svg)](https://github.com/najm07/Printlink/actions/workflows/ci.yml)
+
 Peer-to-peer LAN printer sharing for small offices — no Windows printer
 sharing, no cloud, no accounts. Print from any PC to a printer attached to
 another PC on the LAN, with per-PC access grants that expire automatically.

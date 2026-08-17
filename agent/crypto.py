@@ -27,7 +27,8 @@ def _key_from_token(token: str) -> bytes:
 
 
 def encrypt_payload(plaintext: bytes, token: str) -> bytes:
-    """Encrypt a job file for transport. AAD binds it to the token itself."""
+    """Encrypt a job file for transport. Binding to the token is via key
+    derivation (SHA-256 of the token); no AAD is used."""
     nonce = os.urandom(NONCE_LEN)
     ct = AESGCM(_key_from_token(token)).encrypt(nonce, plaintext, None)
     return nonce + ct

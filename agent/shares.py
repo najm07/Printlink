@@ -6,11 +6,11 @@ Client side = the PC asking to print remotely.
 All datetimes are UTC 'YYYY-MM-DD HH:MM:SS' strings (matches SQLite datetime()).
 """
 from datetime import datetime, timedelta, timezone
-import secrets
 
 from db import Database
 from identity import normalize_id
 from config import DEFAULT_SHARE_DAYS
+from crypto import new_pairing_token
 
 
 def _utcnow() -> datetime:
@@ -26,7 +26,7 @@ def _fmt(dt: datetime) -> str:
 def create_grant(db: Database, remote_id: str, remote_name: str, printer_id: int,
                  days: int = DEFAULT_SHARE_DAYS) -> dict:
     """Called when the host user clicks 'Accept' on a share request."""
-    token = secrets.token_hex(32)  # 64-char pairing token
+    token = new_pairing_token()  # 64-char pairing token
     expires = _utcnow() + timedelta(days=days)
     db.upsert_grant(normalize_id(remote_id), printer_id, token, _fmt(expires), remote_name)
     return {"token": token, "expires_at": _fmt(expires)}
