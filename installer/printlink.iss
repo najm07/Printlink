@@ -9,7 +9,7 @@
 ; Build:  iscc printlink.iss
 
 #define MyAppName      "PrintLink"
-#define MyAppVersion   "0.2.2"
+#define MyAppVersion   "0.2.3"
 #define MyAppPublisher "PrintLink"
 #define MyAppExeName   "PrintLinkAgent.exe"
 
@@ -47,9 +47,13 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     Flags: uninsdeletevalue
 
 [Run]
-; Register the right-click "Print with PrintLink" verb (HKCU, per-user)
+; Register the right-click "Print with PrintLink" verb (HKLM, all users)
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--install-verbs"; \
     Flags: runhidden waituntilterminated; StatusMsg: "Registering Print with PrintLink..."
+; Shared machine-wide data dir: all user accounts see the same printers.
+; Grant Users write access + migrate the installing admin's existing data.
+Filename: "powershell"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""New-Item -ItemType Directory -Force -Path $env:ProgramData\PrintLink | Out-Null; icacls $env:ProgramData\PrintLink /grant Users:(OI)(CI)M /T /Q; $src = Join-Path $env:LOCALAPPDATA 'PrintLink'; if ((Test-Path $src) -and -not (Test-Path (Join-Path $env:ProgramData 'PrintLink\printlink.db'))) Copy-Item (Join-Path $src '*') (Join-Path $env:ProgramData 'PrintLink') -Recurse -Force -ErrorAction SilentlyContinue"""; \
+    Flags: runhidden waituntilterminated; StatusMsg: "Preparing shared PrintLink data..."
 ; Open the agent's TCP port in Windows Firewall (inbound, Private profile)
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""PrintLink Agent"" dir=in action=allow protocol=TCP localport=9100 profile=private"; \
     Flags: runhidden waituntilterminated; StatusMsg: "Opening firewall port 9100..."

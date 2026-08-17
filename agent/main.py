@@ -25,10 +25,10 @@ from tray import PrintLinkTray
 from shares import sweep_expired_grants
 from pipe_reader import PipeReader
 from cli import (install_shell_verbs, uninstall_shell_verbs,
-                 resolve_send_target, check_send_file,
-                 save_selected_target, load_selected_target, pick_target_dialog)
+                 resolve_send_target, save_selected_target,
+                 load_selected_target, pick_target_dialog)
 from preview import ask_print_options
-from config import DATA_DIR, LISTEN_PORT, SWEEP_INTERVAL_S
+from config import (DATA_DIR, LISTEN_PORT, SWEEP_INTERVAL_S, ensure_dirs)
 from logutil import setup_logging, get_logger
 
 log = get_logger("main")
@@ -64,7 +64,7 @@ def _build_sender(db: Database, my_id: str, my_name: str) -> Sender:
 def _cmd_send(args) -> int:
     """One-shot direct send: no tray, no HTTP server, no spooler."""
     setup_logging()
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_dirs()
     my_id = load_or_create_id(DATA_DIR)
     db = Database(DATA_DIR / "printlink.db")
     ok, err = check_send_file(args.send)
@@ -90,6 +90,19 @@ def _cmd_send(args) -> int:
             save_selected_target(*target)
     if target is None:
         log.error("send: no target resolved")
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            messagebox.showwarning(
+                "PrintLink", "No remote printer to print to.\n\n"
+                "Open the PrintLink tray on this PC, add the printer "
+                "by ID, then try again.")
+            root.destroy()
+        except Exception:
+            pass
         print("[PrintLink] no target: select a remote printer in the tray "
               "or pass --target <host_id>", file=sys.stderr)
         return 2
@@ -130,7 +143,7 @@ def _cmd_send(args) -> int:
 
 def _cmd_tray() -> None:
     setup_logging()
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_dirs()
     stop = threading.Event()
 
     # 1. identity + storage

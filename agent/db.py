@@ -70,9 +70,10 @@ class Database:
 
     @contextmanager
     def connect(self):
-        con = sqlite3.connect(self.db_path)
+        con = sqlite3.connect(self.db_path, timeout=10)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys = ON")
+        con.execute("PRAGMA busy_timeout = 10000")  # shared DB across user accounts
         try:
             yield con
             con.commit()
