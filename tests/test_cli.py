@@ -1,8 +1,20 @@
 """Tests for cli.py: send-target resolution and shell-verb command lines."""
 from pathlib import Path
 
+pytest = __import__("pytest")
+
+pytest.importorskip("tkinter")
+
 from cli import (resolve_send_target, check_send_file,
                  save_selected_target, load_selected_target)
+
+
+def test_main_wiring_imports_check_send_file():
+    """Regression: _cmd_send crashed with NameError 'check_send_file is not
+    defined' because main.py never imported it (only exercised at runtime
+    via the right-click verb)."""
+    import main
+    assert main.check_send_file is check_send_file
 
 
 class FakeDB:

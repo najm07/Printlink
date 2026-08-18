@@ -46,6 +46,17 @@ def test_pages_invalid():
     assert parse_page_spec("x-y", 10) is None
 
 
+def test_sumatra_settings_copies_use_multiplier():
+    """Regression: copies must use SumatraPDF's 'Nx' multiplier syntax;
+    'copies=N' is not a recognized -print-settings key and is ignored
+    (printer then prints one copy)."""
+    from printer_local import _sumatra_settings
+    assert _sumatra_settings({"copies": 3}) == "scale=fit,3x"
+    assert _sumatra_settings({"copies": 2, "fit": "actual"}) == "scale=none,2x"
+    assert "copies=" not in _sumatra_settings({"copies": 5})
+    assert _sumatra_settings({"copies": 1, "duplex": "long"}) == "scale=fit,duplex=long"
+
+
 def test_preview_sniff_docx(tmp_path):
     from preview import _sniff_head
     p = tmp_path / "d.docx"

@@ -162,14 +162,23 @@ class PrintLinkTray:
                  path, alias, host_id, ok, msg, opts)
         _notify("PrintLink", msg if ok else f"Failed: {msg}")
 
-    def on_delivered(self, filepath: str, host_id: str, printer_alias: str):
+    def on_delivered(self, filepath: str, host_id: str, printer_alias: str,
+                     reason=None):
         label = self._lookup_label(host_id, printer_alias)
         _notify("PrintLink", f"'{Path(filepath).name}' printed on {label}.")
 
-    def on_failed(self, filepath: str, host_id: str, printer_alias: str):
+    def on_failed(self, filepath: str, host_id: str, printer_alias: str,
+                  reason=None):
         label = self._lookup_label(host_id, printer_alias)
         _notify("PrintLink",
-                f"Failed to print '{Path(filepath).name}' after retries ({label}).")
+                f"Failed to print '{Path(filepath).name}' ({label}): "
+                f"{reason or 'unknown error'}")
+
+    def on_printer_error(self, filepath: str, host_id: str, printer_alias: str,
+                         reason: str):
+        label = self._lookup_label(host_id, printer_alias)
+        _notify("PrintLink",
+                f"{label}: {reason}. Retrying in the background...")
 
     def _lookup_label(self, host_id: str, printer_alias: str) -> str:
         try:

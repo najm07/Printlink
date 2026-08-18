@@ -25,8 +25,9 @@ from tray import PrintLinkTray
 from shares import sweep_expired_grants
 from pipe_reader import PipeReader
 from cli import (install_shell_verbs, uninstall_shell_verbs,
-                 resolve_send_target, save_selected_target,
-                 load_selected_target, pick_target_dialog)
+                 resolve_send_target, check_send_file,
+                 save_selected_target, load_selected_target,
+                 pick_target_dialog)
 from preview import ask_print_options
 from config import (DATA_DIR, LISTEN_PORT, SWEEP_INTERVAL_S, ensure_dirs)
 from logutil import setup_logging, get_logger
@@ -116,10 +117,12 @@ def _cmd_send(args) -> int:
     log.info("send target (from dialog): %s @ %s", alias, host_id)
     discovery = Discovery(my_id, LISTEN_PORT, advertise=False)
     sender = Sender(db, my_id, socket.gethostname(), discovery.resolve)
-    sender.on_delivered = lambda fp, hid, al: log.info(
+    sender.on_delivered = lambda fp, hid, al, reason=None: log.info(
         "send delivered: %s -> %s @ %s", fp, al, hid)
-    sender.on_failed = lambda fp, hid, al: log.error(
-        "send FAILED after retries: %s -> %s @ %s", fp, al, hid)
+    sender.on_failed = lambda fp, hid, al, reason=None: log.error(
+        "send FAILED: %s -> %s @ %s: %s", fp, al, hid, reason or "unknown")
+    sender.on_printer_error = lambda fp, hid, al, reason: log.warning(
+        "send printer error: %s -> %s @ %s: %s", fp, al, hid, reason)
     try:
         ok, msg = sender.print_file(args.send, host_id, alias, options=opts)
         if not ok:
@@ -134,6 +137,18 @@ def _cmd_send(args) -> int:
         else:
             reason = sender.last_error or "unknown error"
             log.error("send FAILED to %s @ %s: %s", alias, host_id, reason)
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                messagebox.showerror(
+                    "PrintLink", f"Failed to print on {alias} @ {host_id}:\n\n"
+                                 f"{reason}")
+                root.destroy()
+            except Exception:
+                pass
             print(f"[PrintLink] failed to {alias} @ {host_id} — {reason}",
                   file=sys.stderr)
         return 0 if delivered else 1
@@ -198,22 +213,32 @@ def _cmd_tray() -> None:
             pipe_reader.stop()
         discovery.close()
 
-    def on_delivered(filepath, host_id, alias):
+    def on_delivered(filepath, host_id, alias, reason=None):
         log.info("delivered %s to %s @ %s", filepath, alias, host_id)
         try:
             tray.on_delivered(filepath, host_id, alias)
         except Exception:
             log.exception("delivery notification failed")
 
-    def on_failed(filepath, host_id, alias):
-        log.error("giving up on %s -> %s @ %s", filepath, alias, host_id)
+    def on_failed(filepath, host_id, alias, reason=None):
+        log.error("giving up on %s -> %s @ %s: %s", filepath, alias, host_id,
+                  reason or "unknown")
         try:
-            tray.on_failed(filepath, host_id, alias)
+            tray.on_failed(filepath, host_id, alias, reason)
         except Exception:
             log.exception("failure notification failed")
 
+    def on_printer_error(filepath, host_id, alias, reason):
+        log.warning("printer error %s -> %s @ %s: %s", filepath, alias,
+                    host_id, reason)
+        try:
+            tray.on_printer_error(filepath, host_id, alias, reason)
+        except Exception:
+            log.exception("printer-error notification failed")
+
     sender.on_delivered = on_delivered
     sender.on_failed = on_failed
+    sender.on_printer_error = on_printer_error
 
     tray = PrintLinkTray(db, my_id, sender.request_share, on_quit,
                          selected_target=selected_target,

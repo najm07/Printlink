@@ -26,14 +26,18 @@ log = get_logger("sender")
 
 class Sender:
     def __init__(self, db: Database, my_id: str, my_name: str, resolver,
-                 on_delivered=None, on_failed=None):
+                 on_delivered=None, on_failed=None, on_printer_error=None):
         """resolver(host_id) -> (ip, port) or None  (from discovery.py)
-        on_delivered/on_failed(filepath, host_id, printer_alias) called from
-        the retry thread when a queued file is delivered or given up on."""
+        on_delivered(filepath, host_id, alias)      — job printed
+        on_failed(filepath, host_id, alias, reason) — job given up on
+        on_printer_error(filepath, host_id, alias, reason) — first failed
+        attempt of a job (printer offline, paper out, host error, ...);
+        called once per job, before retries continue."""
         self.db, self.my_id, self.my_name = db, my_id, my_name
         self.resolver = resolver
         self.on_delivered = on_delivered
         self.on_failed = on_failed
+        self.on_printer_error = on_printer_error
         self._jobs: queue.Queue = queue.Queue()
         self._pending = 0
         self._ever_failed = False
@@ -53,7 +57,8 @@ class Sender:
         with self._lock:
             return self._pending == 0 and not self._ever_failed
 
-    def _job_done(self, filepath: str, host_id: str, printer_alias: str, ok: bool):
+    def _job_done(self, filepath: str, host_id: str, printer_alias: str, ok: bool,
+                  reason: str | None = None):
         with self._lock:
             self._pending = max(0, self._pending - 1)
             if not ok:
@@ -63,7 +68,7 @@ class Sender:
         cb = self.on_delivered if ok else self.on_failed
         if cb:
             try:
-                cb(filepath, host_id, printer_alias)
+                cb(filepath, host_id, printer_alias, reason)
             except Exception:
                 log.exception("delivery callback failed for %s", filepath)
 
@@ -224,7 +229,8 @@ class Sender:
         except OSError:
             pass
 
-    def _retry_loop(self, max_attempts: int = RETRY_MAX_ATTEMPTS):
+    def _retry_loop(self):
+        max_attempts = RETRY_MAX_ATTEMPTS
         pending = []
         while not self._stop.is_set():
             try:
@@ -243,13 +249,21 @@ class Sender:
                              Path(filepath).name, alias, host_id)
                     self._job_done(filepath, host_id, alias, True)
                     continue  # delivered
+                reason = self.last_error or "unknown error"
+                if attempts == 0 and self.on_printer_error:
+                    # first failed attempt: tell the user what's wrong now,
+                    # before the silent retry period starts
+                    try:
+                        self.on_printer_error(filepath, host_id, alias, reason)
+                    except Exception:
+                        log.exception("printer-error callback failed for %s",
+                                      filepath)
                 if not retryable:
                     log.error("retry_loop: giving up on %s (receiver rejected, "
-                              "not retryable): %s", Path(filepath).name,
-                              self.last_error or "unknown")
+                              "not retryable): %s", Path(filepath).name, reason)
                     if delete_after:
                         self._cleanup(filepath)
-                    self._job_done(filepath, host_id, alias, False)
+                    self._job_done(filepath, host_id, alias, False, reason)
                     continue
                 if attempts + 1 < max_attempts:
                     still.append((filepath, host_id, alias, attempts + 1,
@@ -259,7 +273,7 @@ class Sender:
                               Path(filepath).name, max_attempts)
                     if delete_after:
                         self._cleanup(filepath)
-                    self._job_done(filepath, host_id, alias, False)
+                    self._job_done(filepath, host_id, alias, False, reason)
             pending = still
             if pending:
                 log.info("retry_loop: %d job(s) pending, retrying in %ds",

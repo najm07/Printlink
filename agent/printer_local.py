@@ -230,7 +230,7 @@ def _sumatra_settings(opts: dict) -> str:
     except (TypeError, ValueError):
         copies = 1
     if copies > 1:
-        parts.append(f"copies={copies}")
+        parts.append(f"{copies}x")  # Sumatra syntax: "Nx" = print N times
     return ",".join(parts)
 
 
