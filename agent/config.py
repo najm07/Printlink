@@ -5,6 +5,9 @@ from pathlib import Path
 
 APP_NAME = "PrintLink"
 
+# Keep in sync with MyAppVersion in installer/printlink.iss
+VERSION = "0.2.6"
+
 # --- storage ---
 # Data lives machine-wide under %PROGRAMDATA% so EVERY user account on the PC
 # shares one identity, one grant/printers DB, and one persisted target —

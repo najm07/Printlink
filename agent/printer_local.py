@@ -188,17 +188,23 @@ def print_pdf(filepath: str, printer_name: str, opts: dict | None = None,
     if settings:
         cmd += ["-print-settings", settings]
     cmd.append(os.path.abspath(subset))
-    log.info("print_pdf: %s (timeout=%ds)", " ".join(cmd), timeout)
+    copies = max(1, int(opts.get("copies") or 1))
+    # One Sumatra invocation per copy: Sumatra's 'Nx' settings multiplier is
+    # not honored reliably with -print-to, so we print N separate jobs.
+    per_run = max(30, timeout // copies)
     try:
-        import subprocess
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
-        if r.returncode != 0:
-            err = (r.stderr.decode("utf-8", "replace")
-                   + r.stdout.decode("utf-8", "replace")).strip()
-            raise RuntimeError(f"SumatraPDF exit {r.returncode}: {err[:300]}")
-        log.info("print_pdf: printed '%s' on '%s' (pages=%r copies=%s)",
-                 os.path.basename(filepath), printer_name, pages,
-                 opts.get("copies"))
+        for i in range(copies):
+            log.info("print_pdf: copy %d/%d: %s (timeout=%ds)",
+                     i + 1, copies, " ".join(cmd), per_run)
+            import subprocess
+            r = subprocess.run(cmd, capture_output=True, timeout=per_run)
+            if r.returncode != 0:
+                err = (r.stderr.decode("utf-8", "replace")
+                       + r.stdout.decode("utf-8", "replace")).strip()
+                raise RuntimeError(f"SumatraPDF exit {r.returncode}: {err[:300]}")
+            log.info("print_pdf: printed '%s' on '%s' (copy %d/%d, pages=%r)",
+                     os.path.basename(filepath), printer_name, i + 1, copies,
+                     pages)
     finally:
         if temp:
             try:
@@ -225,12 +231,6 @@ def _sumatra_settings(opts: dict) -> str:
         parts.append(f"duplex={duplex}")
     elif duplex == "on":
         parts.append("duplex=long")
-    try:
-        copies = max(1, int(opts.get("copies") or 1))
-    except (TypeError, ValueError):
-        copies = 1
-    if copies > 1:
-        parts.append(f"{copies}x")  # Sumatra syntax: "Nx" = print N times
     return ",".join(parts)
 
 
@@ -269,15 +269,20 @@ def print_word(filepath: str, printer_name: str, opts: dict | None = None,
                             "using Word default", printer_name)
             doc = word.Documents.Open(os.path.abspath(filepath), ReadOnly=True)
             try:
-                if pages and pages.lower() not in ("all", "*"):
-                    doc.PrintOut(Background=False, Range=3,  # wdPrintRangeOfPages
-                                 Pages=pages, Copies=copies)
-                else:
-                    doc.PrintOut(Background=False, Copies=copies)
+                # One PrintOut per copy: Word COM sometimes ignores the
+                # Copies argument entirely (known quirk), so we loop.
+                for i in range(max(1, copies)):
+                    if pages and pages.lower() not in ("all", "*"):
+                        doc.PrintOut(Background=False, Range=3,
+                                     # wdPrintRangeOfPages
+                                     Pages=pages)
+                    else:
+                        doc.PrintOut(Background=False)
+                    log.info("print_word: printed '%s' on '%s' (copy %d/%d, "
+                             "pages=%r)", os.path.basename(filepath),
+                             printer_name, i + 1, max(1, copies), pages)
             finally:
                 doc.Close(SaveChanges=0)
-            log.info("print_word: printed '%s' on '%s' (pages=%r copies=%s)",
-                     os.path.basename(filepath), printer_name, pages, copies)
         except Exception as e:
             result["error"] = f"Word print failed: {e!r}"
         finally:

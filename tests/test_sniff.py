@@ -46,15 +46,42 @@ def test_pages_invalid():
     assert parse_page_spec("x-y", 10) is None
 
 
-def test_sumatra_settings_copies_use_multiplier():
-    """Regression: copies must use SumatraPDF's 'Nx' multiplier syntax;
-    'copies=N' is not a recognized -print-settings key and is ignored
-    (printer then prints one copy)."""
+def test_sumatra_settings_no_copies_token():
+    """Copies are printed via one Sumatra invocation per copy (the 'Nx'
+    multiplier is not honored reliably with -print-to), so -print-settings
+    must never carry a copies token."""
     from printer_local import _sumatra_settings
-    assert _sumatra_settings({"copies": 3}) == "scale=fit,3x"
-    assert _sumatra_settings({"copies": 2, "fit": "actual"}) == "scale=none,2x"
+    assert _sumatra_settings({"copies": 3}) == "scale=fit"
+    assert _sumatra_settings({"copies": 2, "fit": "actual"}) == "scale=none"
     assert "copies=" not in _sumatra_settings({"copies": 5})
+    assert "x" not in _sumatra_settings({"copies": 5}).split(",")[-1]
     assert _sumatra_settings({"copies": 1, "duplex": "long"}) == "scale=fit,duplex=long"
+
+
+def test_print_pdf_runs_sumatra_once_per_copy(tmp_path, monkeypatch):
+    """Regression: copies=2 printed only 1 copy on hosts where SumatraPDF
+    ignores the 'Nx' settings multiplier. print_pdf must invoke Sumatra
+    once per copy."""
+    import subprocess
+    from printer_local import print_pdf
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-1.7 test")
+    monkeypatch.setattr("printer_local._find_sumatra",
+                        lambda: "C:/SumatraPDF.exe")
+    calls = []
+
+    def fake_run(cmd, capture_output=True, timeout=0):
+        calls.append((cmd, timeout))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    print_pdf(str(f), "Fake Printer", {"copies": 3}, timeout=90)
+    assert len(calls) == 3
+    for cmd, timeout in calls:
+        assert cmd[0] == "C:/SumatraPDF.exe"
+        assert "-print-settings" not in cmd or "copies=" not in cmd[-1]
+        assert cmd[-1].endswith("doc.pdf")
+        assert timeout == 30  # 90 // 3
 
 
 def test_preview_sniff_docx(tmp_path):

@@ -24,7 +24,7 @@ from printer_local import (list_printers, printer_status, print_via_shell,
                            DEFAULT_OPTIONS)
 from identity import normalize_id
 from crypto import decrypt_payload
-from config import LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME
+from config import LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME, VERSION
 from logutil import get_logger
 
 log = get_logger("server")
@@ -57,7 +57,7 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     @app.get("/ping")
     def ping():
         log.info("GET /ping from %s", request.remote_addr)
-        return jsonify({"id": my_id, "ok": True})
+        return jsonify({"id": my_id, "ok": True, "version": VERSION})
 
     @app.get("/printers")
     def printers():

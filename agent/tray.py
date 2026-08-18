@@ -15,6 +15,7 @@ from db import Database, remote_label
 from printer_local import list_printers
 from shares import DEFAULT_SHARE_DAYS
 from logutil import get_logger
+from config import VERSION
 
 log = get_logger("tray")
 
@@ -100,6 +101,8 @@ class PrintLinkTray:
 
     def _menu(self):
         return pystray.Menu(
+            pystray.MenuItem(f"PrintLink v{VERSION}", lambda *_: None,
+                             enabled=False),
             pystray.MenuItem(f"My ID: {self.my_id}", lambda *_: None, enabled=False),
             pystray.MenuItem("Copy my ID", self._copy_id),
             pystray.Menu.SEPARATOR,

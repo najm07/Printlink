@@ -9,7 +9,7 @@
 ; Build:  iscc printlink.iss
 
 #define MyAppName      "PrintLink"
-#define MyAppVersion   "0.2.4"
+#define MyAppVersion   "0.2.6"
 #define MyAppPublisher "PrintLink"
 #define MyAppExeName   "PrintLinkAgent.exe"
 
@@ -47,6 +47,10 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     Flags: uninsdeletevalue
 
 [Run]
+; Replace any running (stale) agent with the freshly installed binary:
+; a reinstall alone does NOT unload the old process from memory.
+Filename: "powershell"; Parameters: "-NoProfile -Command ""Stop-Process -Name PrintLinkAgent -Force -ErrorAction SilentlyContinue; Start-Process '{app}\{#MyAppExeName}'"""; \
+    Flags: runhidden waituntilterminated; StatusMsg: "Restarting PrintLink agent..."
 ; Register the right-click "Print with PrintLink" verb (HKLM, all users)
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--install-verbs"; \
     Flags: runhidden waituntilterminated; StatusMsg: "Registering Print with PrintLink..."

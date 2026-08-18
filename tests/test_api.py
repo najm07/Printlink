@@ -60,7 +60,9 @@ def do_print(client, token, sender="111 222 333", payload=b"%PDF-1.4 test",
 
 def test_ping(env):
     client, _ = env
-    assert client.get("/ping").get_json()["id"] == "482 917 305"
+    j = client.get("/ping").get_json()
+    assert j["id"] == "482 917 305"
+    assert "version" in j  # lets users verify which build a PC runs
 
 
 def test_share_accept_and_print(env):
