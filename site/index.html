@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrintLink — Peer-to-peer LAN printer sharing</title>
+<meta name="description" content="Print from any PC on your office LAN to a printer attached to another PC — no cloud, no accounts, no Windows printer sharing.">
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #1e6ff5;
+    --accent2: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 0; border-bottom: 1px solid var(--border);
+  }
+  .brand { font-size: 20px; font-weight: 600; letter-spacing: .3px; }
+  .brand span { color: var(--accent2); }
+  header nav a { color: var(--muted); text-decoration: none; margin-left: 20px; font-size: 14px; }
+  header nav a:hover { color: var(--text); }
+  .hero { padding: 90px 0 70px; text-align: center; }
+  .hero h1 { font-size: 44px; font-weight: 700; line-height: 1.15; letter-spacing: -.5px; }
+  .hero h1 em { font-style: normal; color: var(--accent2); }
+  .hero p.lead { max-width: 640px; margin: 18px auto 34px; color: var(--muted); font-size: 18px; }
+  .cta { display: inline-flex; gap: 14px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  .btn {
+    display: inline-block; padding: 13px 30px; border-radius: 8px;
+    font-size: 16px; font-weight: 600; text-decoration: none; border: 1px solid transparent;
+  }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { background: #2f7cff; }
+  .btn.ghost { border-color: var(--border); color: var(--text); background: var(--panel); }
+  .btn.ghost:hover { border-color: var(--accent2); }
+  .meta { margin-top: 16px; font-size: 13px; color: var(--muted); }
+  .meta a { color: var(--accent2); text-decoration: none; }
+  section { padding: 60px 0; border-top: 1px solid var(--border); }
+  h2 { font-size: 28px; margin-bottom: 26px; letter-spacing: -.3px; }
+  .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 18px; }
+  .step { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 22px; }
+  .step .num {
+    width: 30px; height: 30px; border-radius: 50%; background: var(--accent);
+    color: #fff; display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 15px; margin-bottom: 12px;
+  }
+  .step h3 { font-size: 17px; margin-bottom: 8px; }
+  .step p { color: var(--muted); font-size: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 22px; }
+  .card h3 { font-size: 16px; margin-bottom: 8px; }
+  .card p { color: var(--muted); font-size: 14px; }
+  code {
+    background: #21262d; border: 1px solid var(--border); border-radius: 5px;
+    padding: 1px 6px; font-size: 13px;
+  }
+  .req { color: var(--muted); font-size: 14px; }
+  .req li { margin-bottom: 6px; }
+  footer { padding: 40px 0 60px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+  footer a { color: var(--accent2); text-decoration: none; }
+  @media (max-width: 600px) {
+    .hero h1 { font-size: 32px; }
+    .hero { padding: 60px 0 50px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <div class="brand">Print<span>Link</span></div>
+  <nav>
+    <a href="#how">How it works</a>
+    <a href="#features">Features</a>
+    <a href="#requirements">Requirements</a>
+    <a href="https://github.com/najm07/Printlink">GitHub</a>
+  </nav>
+</header>
+
+<div class="hero wrap">
+  <h1>Print from any PC on your LAN,<br>to a printer attached to <em>another</em> PC.</h1>
+  <p class="lead">PrintLink is a peer-to-peer printer-sharing agent for small offices.
+  No cloud. No accounts. No Windows printer sharing. Jobs travel encrypted, PC-to-PC.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/najm07/Printlink/releases/latest">Download for Windows</a>
+    <a class="btn ghost" href="https://github.com/najm07/Printlink">View source</a>
+  </div>
+  <div class="meta">
+    <img src="https://github.com/najm07/Printlink/actions/workflows/ci.yml/badge.svg" alt="CI">
+    &nbsp;Requires Windows 10/11
+  </div>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="num">1</span>
+        <h3>Share a printer</h3>
+        <p>On the PC with the printer, share it under a friendly alias from the tray icon.</p>
+      </div>
+      <div class="step">
+        <span class="num">2</span>
+        <h3>Add it from another PC</h3>
+        <p>Enter the host PC's 9-digit ID. The host gets an accept/refuse dialog — nothing prints without permission.</p>
+      </div>
+      <div class="step">
+        <span class="num">3</span>
+        <h3>Right-click to print</h3>
+        <p>Right-click any document and choose <em>Print with PrintLink</em>. A preview dialog lets you pick the target printer, copies, pages, paper, color and duplex before anything leaves your machine.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <h2>Features</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Print preview dialog</h3>
+        <p>Choose the destination printer and print options (copies, page range, paper, color, duplex, orientation, fit) with a rendered first-page preview.</p>
+      </div>
+      <div class="card">
+        <h3>Per-PC grants, not accounts</h3>
+        <p>Access is granted PC-to-PC with 9-digit IDs. Grants expire automatically (default 7 days) and can be revoked or extended any time from the tray.</p>
+      </div>
+      <div class="card">
+        <h3>Encrypted jobs</h3>
+        <p>Every job is encrypted with AES-256-GCM keyed by the pairing token, then delivered directly between agents over HTTP — no central server in the path.</p>
+      </div>
+      <div class="card">
+        <h3>No virtual printer, no drivers</h3>
+        <p>No port monitors, no admin rights per share. The receiver renders by format: PDF (PyMuPDF + SumatraPDF), Word (COM), images (GDI+), text (spooler).</p>
+      </div>
+      <div class="card">
+        <h3>Automatic discovery</h3>
+        <p>Agents find each other via mDNS on the LAN, with a stored-IP fallback when mDNS is blocked by VLANs or switches.</p>
+      </div>
+      <div class="card">
+        <h3>Works for every user on a PC</h3>
+        <p>Data is shared machine-wide, so every Windows account on a PC sees the same printers and can use the right-click verb.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="requirements">
+  <div class="wrap">
+    <h2>Requirements</h2>
+    <ul class="req">
+      <li>Windows 10 or 11 on every PC (the share logic and HTTP API are cross-platform; printing uses Windows features).</li>
+      <li>Host PC: SumatraPDF installed for PDF printing; Microsoft Word for <code>.docx</code>/<code>.doc</code> documents.</li>
+      <li>PCs on the same LAN; firewall port TCP 9100 opened (the installer does this for you on the Private profile).</li>
+    </ul>
+  </div>
+</section>
+
+<footer class="wrap">
+  <p>PrintLink is MIT-licensed. The preview thumbnails and PDF page-range rendering use PyMuPDF, which is
+  AGPL-3.0 / commercial dual licensed — see the README for details. <a href="https://github.com/najm07/Printlink/issues">Report issues</a></p>
+</footer>
+
+</body>
+</html>
