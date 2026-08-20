@@ -6,7 +6,7 @@ from pathlib import Path
 APP_NAME = "PrintLink"
 
 # Keep in sync with MyAppVersion in installer/printlink.iss
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 
 # --- storage ---
 # Data lives machine-wide under %PROGRAMDATA% so EVERY user account on the PC
@@ -74,6 +74,24 @@ def migrate_from_per_user():
                 pass
 
 
+def _try_fix_acl() -> None:
+    """Best-effort: make the shared dir writable by all local users. The
+    installer does this too; this covers manual/pl_dist deployments.
+    Silently ignored when the current user lacks the rights."""
+    if DATA_DIR != SHARED_DIR:
+        return
+    try:
+        import subprocess
+        subprocess.run(
+            ["icacls", str(SHARED_DIR), "/grant", "Users:(OI)(CI)M",
+             "/T", "/Q"],
+            capture_output=True, timeout=15)
+    except Exception:
+        pass
+
+
 def ensure_dirs():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     migrate_from_per_user()
+    _try_fix_acl()
+

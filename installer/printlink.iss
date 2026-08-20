@@ -9,7 +9,7 @@
 ; Build:  iscc printlink.iss
 
 #define MyAppName      "PrintLink"
-#define MyAppVersion   "0.2.6"
+#define MyAppVersion   "0.2.7"
 #define MyAppPublisher "PrintLink"
 #define MyAppExeName   "PrintLinkAgent.exe"
 
@@ -83,3 +83,4 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""PrintLin
 Type: files; Name: "{app}\{#MyAppExeName}"
 ; Drop the persisted send-target preference (re-pick in the tray after reinstall)
 Type: files; Name: "{localappdata}\PrintLink\target.json"
+
