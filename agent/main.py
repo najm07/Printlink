@@ -21,7 +21,6 @@ from db import Database
 from discovery import Discovery
 from server import create_app, run_in_thread
 from sender import Sender
-from tray import PrintLinkTray
 from shares import sweep_expired_grants
 from pipe_reader import PipeReader
 from cli import (install_shell_verbs, uninstall_shell_verbs,
@@ -239,6 +238,8 @@ def _cmd_tray() -> None:
     sender.on_delivered = on_delivered
     sender.on_failed = on_failed
     sender.on_printer_error = on_printer_error
+
+    from tray import PrintLinkTray  # lazy: pystray needs a display/desktop
 
     tray = PrintLinkTray(db, my_id, sender.request_share, on_quit,
                          selected_target=selected_target,
