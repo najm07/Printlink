@@ -53,6 +53,8 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
 [Run]
 ; Replace any running (stale) agent with the freshly installed binary:
 ; a reinstall alone does NOT unload the old process from memory.
+; The Start-Process here is the ONE guaranteed launch (it also covers
+; silent upgrades, where the postinstall entry below is skipped).
 Filename: "powershell"; Parameters: "-NoProfile -Command ""Stop-Process -Name PrintLinkAgent -Force -ErrorAction SilentlyContinue; Start-Process '{app}\{#MyAppExeName}'"""; \
     Flags: runhidden waituntilterminated; StatusMsg: "Restarting PrintLink agent..."
 ; Register the right-click "Print with PrintLink" verb (HKLM, all users)
@@ -68,9 +70,11 @@ Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""PrintLink A
 ; mDNS (UDP 5353) is usually allowed by default on Private profile, but be explicit
 Filename: "netsh"; Parameters: "advfirewall firewall add rule name=""PrintLink mDNS"" dir=in action=allow protocol=UDP localport=5353 profile=private"; \
     Flags: runhidden waituntilterminated
-; Launch the agent after install
-Filename: "{app}\{#MyAppExeName}"; Description: "Start PrintLink now"; \
-    Flags: nowait postinstall skipifsilent
+; Manual launch is OPT-IN: the agent was already started above — leaving
+; this ticked used to run a SECOND instance (duplicate tray icon, mDNS
+; name collision, port bind fight).
+Filename: "{app}\{#MyAppExeName}"; Description: "Start PrintLink now (already running — only tick this if you stopped it)"; \
+    Flags: nowait postinstall skipifsilent unchecked
 
 [UninstallRun]
 ; Remove the right-click verb (HKLM first, then HKCU fallback — same order

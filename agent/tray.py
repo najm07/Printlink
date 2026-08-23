@@ -145,6 +145,7 @@ class PrintLinkTray:
             pystray.MenuItem("Manage remote printers...", self._manage_remotes),
             pystray.MenuItem("My remote printers", self._list_remotes),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Check for updates...", self._check_updates),
             pystray.MenuItem("Quit", self._quit),
         )
 
@@ -526,3 +527,40 @@ class PrintLinkTray:
 
     def run(self):
         self.icon.run()
+
+    # ---- updates ----
+    def offer_update(self, info: dict):
+        """Runs on the updater thread; asks, installs, exits the agent."""
+        tag = info.get("tag", "new version")
+        if not self._update_prompt(tag):
+            log.info("update to %s declined by user", tag)
+            return
+        import updater as upd
+        ok, msg = upd.download_and_install(info["asset_url"], tag)
+        if not ok:
+            _notify("PrintLink", msg)
+            return
+        _notify("PrintLink", msg)
+        time.sleep(2)          # let the toast render before we die
+        self._quit()
+
+    def _update_prompt(self, tag: str) -> bool:
+        """Yes/no dialog from the updater thread (its own Tk root)."""
+        def ask(root):
+            return messagebox.askyesno(
+                "PrintLink — update available",
+                f"A newer version ({tag}) is available.\n"
+                f"You are running {VERSION}.\n\n"
+                "Download and install it now? PrintLink will restart.")
+        return bool(_dialog(ask))
+
+    def _check_updates(self, *_):
+        def work():
+            import updater as upd
+            info = upd.check_update()
+            if info:
+                self.offer_update(info)
+            else:
+                _notify("PrintLink", f"You are up to date (v{VERSION}).")
+        threading.Thread(target=work, daemon=True,
+                         name="printlink-update-manual").start()

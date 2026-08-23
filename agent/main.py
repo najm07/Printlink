@@ -230,6 +230,16 @@ def _cmd_tray() -> None:
                          revoke_fn=sender.revoke_share)
     tray_holder["tray"] = tray
 
+    # 7. update check (throttled to daily; prompt + consent, never silent)
+    def offer_update(info):
+        try:
+            tray.offer_update(info)
+        except Exception:
+            log.exception("update prompt failed")
+
+    import updater
+    updater.background_check(on_update=offer_update)
+
     try:
         tray.run()  # blocks until Quit
     finally:
