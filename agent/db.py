@@ -106,8 +106,15 @@ class Database:
             cur = con.execute("DELETE FROM shared_printers WHERE id = ?", (printer_id,))
             return cur.rowcount > 0
 
+    def get_enabled_printer(self, printer_id: int) -> sqlite3.Row | None:
+        with self.connect() as con:
+            return con.execute(
+                "SELECT * FROM shared_printers WHERE id = ? AND enabled = 1",
+                (printer_id,)).fetchone()
+
     # ---- host side: grants to remote PCs ----
-    def upsert_grant(self, remote_id, printer_id, token, expires_at, remote_name=None) -> None:
+    def upsert_grant(self, remote_id, printer_id, token, expires_at,
+                     remote_name=None) -> None:
         with self.connect() as con:
             con.execute(
                 """INSERT INTO grants (remote_id, remote_name, printer_id, token, expires_at)
@@ -124,13 +131,30 @@ class Database:
                 "SELECT * FROM grants WHERE remote_id = ? AND token = ?",
                 (remote_id, token)).fetchone()
 
-    def find_grant_by_remote_and_alias(self, remote_id: str, printer_alias: str) -> sqlite3.Row | None:
+    def list_grants_for_remote(self, remote_id: str,
+                               status: str | None = "active") -> list[sqlite3.Row]:
+        """All of one remote's grants — the HMAC path probes these by hint."""
+        q = "SELECT g.*, p.alias AS printer_alias FROM grants g " \
+            "JOIN shared_printers p ON p.id = g.printer_id WHERE g.remote_id = ?"
+        args: tuple = (remote_id,)
+        if status:
+            q += " AND g.status = ?"
+            args = (remote_id, status)
+        with self.connect() as con:
+            return con.execute(q, args).fetchall()
+
+    def find_grants_by_remote_and_alias(self, remote_id: str,
+                                        printer_alias: str) -> list[sqlite3.Row]:
         with self.connect() as con:
             return con.execute(
                 """SELECT g.*, p.alias AS printer_alias
                    FROM grants g JOIN shared_printers p ON p.id = g.printer_id
                    WHERE g.remote_id = ? AND p.alias = ?""",
-                (remote_id, printer_alias)).fetchone()
+                (remote_id, printer_alias)).fetchall()
+
+    def find_grant_by_remote_and_alias(self, remote_id: str, printer_alias: str) -> sqlite3.Row | None:
+        rows = self.find_grants_by_remote_and_alias(remote_id, printer_alias)
+        return rows[0] if rows else None
 
     def set_grant_status(self, grant_id: int, status: str) -> None:
         with self.connect() as con:

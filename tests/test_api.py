@@ -34,6 +34,7 @@ from config import MAX_SHARE_DAYS, RATE_SHARE_MAX
 import server as server_mod
 from server import create_app
 from crypto import encrypt_payload
+from auth import sign_nonce, token_hint
 
 
 @pytest.fixture
@@ -269,3 +270,122 @@ def test_print_failure_returns_generic_body(env, monkeypatch):
                     content_type="multipart/form-data")
     assert r.status_code == 500
     assert r.get_json() == {"error": "print failed"}
+
+
+# ---------- Phase 3: HMAC challenge-response auth (token never on wire) ----
+
+def _challenge(client, sender="111 222 333"):
+    r = client.get("/auth-challenge", query_string={"sender_id": sender})
+    assert r.status_code == 200
+    return r.get_json()["nonce"]
+
+
+def _do_print_proof(client, token, sender="111 222 333",
+                    payload=b"%PDF-1.4 test", nonce=None):
+    nonce = nonce or _challenge(client, sender)
+    body = encrypt_payload(payload, token)
+    return client.post("/print",
+                       headers={"X-Sender-ID": sender,
+                                "X-Token-Hint": token_hint(token),
+                                "X-Nonce": nonce,
+                                "X-Signature": sign_nonce(token, nonce)},
+                       data={"file": (io.BytesIO(body), "doc.pdf")},
+                       content_type="multipart/form-data")
+
+
+def test_challenge_bad_sender_400(env):
+    client, _db = env
+    r = client.get("/auth-challenge", query_string={"sender_id": "abc"})
+    assert r.status_code == 400
+
+
+def test_hmac_print_flow(env):
+    """Full 0.3 flow: no X-Token header anywhere, job accepted."""
+    client, db = env
+    token = request_share(client).get_json()["token"]
+    r = _do_print_proof(client, token)
+    assert r.status_code == 200 and r.get_json()["status"] == "accepted"
+    assert PRINTED[-1][0] == b"%PDF-1.4 test"
+
+
+def test_hmac_wrong_proof_403(env):
+    client, _db = env
+    token = request_share(client).get_json()["token"]
+    nonce = _challenge(client)
+    r = client.post("/print",
+                    headers={"X-Sender-ID": "111 222 333",
+                             "X-Token-Hint": token_hint(token),
+                             "X-Nonce": nonce,
+                             "X-Signature": sign_nonce("ff" * 32, nonce)},
+                    data={"file": (io.BytesIO(b"x" * 64), "d.pdf")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 403
+    assert r.get_json()["error"] == "unknown ID or proof"
+
+
+def test_nonce_is_single_use(env):
+    client, _db = env
+    token = request_share(client).get_json()["token"]
+    nonce = _challenge(client)
+    assert _do_print_proof(client, token, nonce=nonce).status_code == 200
+    replay = client.post("/print",
+                         headers={"X-Sender-ID": "111 222 333",
+                                  "X-Token-Hint": token_hint(token),
+                                  "X-Nonce": nonce,
+                                  "X-Signature": sign_nonce(token, nonce)},
+                         data={"file": (io.BytesIO(b"x" * 64), "d.pdf")},
+                         content_type="multipart/form-data")
+    assert replay.status_code == 403
+    assert replay.get_json()["error"] == "invalid or expired challenge"
+
+
+def test_expired_nonce_rejected(env, monkeypatch):
+    monkeypatch.setattr(server_mod, "AUTH_NONCE_TTL_S", 0)
+    client, _db = env
+    token = request_share(client).get_json()["token"]
+    r = _do_print_proof(client, token)   # TTL 0 -> already stale when used
+    assert r.status_code == 403
+    assert r.get_json()["error"] == "invalid or expired challenge"
+
+
+def test_legacy_token_still_accepted_while_enabled(env):
+    """Pre-0.3 senders keep working during the transition window."""
+    client, _db = env
+    token = request_share(client).get_json()["token"]
+    r = do_print(client, token)          # legacy X-Token header path
+    assert r.status_code == 200
+
+
+def test_legacy_token_rejected_when_disabled(env, monkeypatch):
+    monkeypatch.setattr(server_mod, "LEGACY_TOKEN_AUTH", False)
+    client, _db = env
+    token = request_share(client).get_json()["token"]
+    r = do_print(client, token)
+    assert r.status_code == 403
+    assert "update PrintLink" in r.get_json()["error"]
+
+
+def test_missing_credentials_403(env):
+    client, _db = env
+    request_share(client)
+    r = client.post("/print",
+                    headers={"X-Sender-ID": "111 222 333"},
+                    data={"file": (io.BytesIO(b"x"), "d.pdf")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 403
+
+
+def test_revoke_grant_via_proof(env):
+    client, db = env
+    token = request_share(client).get_json()["token"]
+    nonce = _challenge(client)
+    r = client.post("/revoke-grant",
+                    json={"sender_id": "111 222 333",
+                          "printer_alias": "Accounting-HP",
+                          "nonce": nonce,
+                          "signature": sign_nonce(token, nonce)})
+    assert r.status_code == 200 and r.get_json()["status"] == "revoked"
+    assert db.list_grants()[0]["status"] == "revoked"
+    # and the revoked grant can no longer print via proof either
+    r2 = _do_print_proof(client, token)
+    assert r2.status_code == 403

@@ -17,8 +17,9 @@ from db import Database
 from identity import normalize_id, is_valid_id
 from shares import store_accepted_share, get_usable_printer
 from crypto import encrypt_payload
+from auth import sign_nonce, token_hint
 from config import (CONNECT_TIMEOUT_S, READ_TIMEOUT_S, RETRY_INTERVAL_S,
-                    RETRY_MAX_ATTEMPTS)
+                    RETRY_MAX_ATTEMPTS, ROUTE_VERIFY_TTL_S)
 from logutil import get_logger
 
 log = get_logger("sender")
@@ -55,6 +56,9 @@ class Sender:
         self._ever_failed = False
         self.last_error: str | None = None
         self._lock = threading.Lock()
+        # host_id -> (base_url, valid_until): a route we /ping-verified as
+        # really belonging to that ID (audit S2 — stale-IP impersonation).
+        self._routes: dict[str, tuple[str, float]] = {}
         self._drained = threading.Event()
         self._drained.set()
         self._stop = threading.Event()
@@ -84,7 +88,7 @@ class Sender:
             except Exception:
                 log.exception("delivery callback failed for %s", filepath)
 
-    # ---------- address resolution ----------
+    # ---------- address resolution + identity verification ----------
     def _base_url(self, host_id: str) -> str | None:
         host_id = normalize_id(host_id)
         found = self.resolver(host_id)
@@ -102,27 +106,69 @@ class Sender:
         log.warning("could not resolve %s: mDNS miss and no stored IP", host_id)
         return None
 
+    def _identify(self, base: str) -> str | None:
+        """Peer's self-reported ID from /ping; None when unreachable or
+        the answer isn't a well-formed 200."""
+        try:
+            r = requests.get(f"{base}/ping", timeout=CONNECT_TIMEOUT_S)
+        except requests.RequestException as e:
+            log.warning("ping %s failed: %r", base, e)
+            return None
+        if r.status_code != 200:
+            return None
+        peer = normalize_id(_safe_json(r).get("id", ""))
+        return peer or None
+
+    def _verified_base_url(self, host_id: str) -> tuple[str | None, str | None]:
+        """Resolve an ID to an address AND verify that machine's identity
+        before anything sensitive is sent to it. Returns (base, error).
+
+        Positive verifications are cached briefly so print retries don't
+        re-ping on every attempt; mismatches drop the cached route."""
+        host_id = normalize_id(host_id)
+        route = self._routes.get(host_id)
+        if route and route[1] > time.monotonic():
+            return route[0], None
+        base = self._base_url(host_id)
+        if base is None:
+            return None, ("Host not found on the LAN "
+                          "(is it online and running PrintLink?)")
+        peer = self._identify(base)
+        if peer is None:
+            return None, f"Host at {base} did not answer its /ping properly."
+        if peer != host_id:
+            self._routes.pop(host_id, None)
+            return None, f"ID mismatch: that IP answers as {peer}."
+        self._routes[host_id] = (base, time.monotonic() + ROUTE_VERIFY_TTL_S)
+        return base, None
+
+    def _challenge(self, base: str) -> str | None:
+        """Fetch a single-use HMAC challenge. None => pre-0.3 host (or its
+        challenge endpoint failed) and callers fall back to legacy auth."""
+        try:
+            r = requests.get(f"{base}/auth-challenge",
+                             params={"sender_id": self.my_id},
+                             timeout=CONNECT_TIMEOUT_S)
+        except requests.RequestException as e:
+            log.warning("auth-challenge %s failed: %r", base, e)
+            return None
+        nonce = _safe_json(r).get("nonce")
+        if not nonce:
+            log.info("no challenge from %s (pre-0.3 host? HTTP %d)",
+                     base, r.status_code)
+        return nonce
+
     # ---------- share request ----------
     def request_share(self, host_id: str, printer_alias: str, days: int,
                       name: str | None = None) -> tuple[bool, str]:
         if not is_valid_id(host_id):
             log.warning("request_share: invalid ID %r", host_id)
             return False, "Invalid ID format."
-        base = self._base_url(host_id)
+        base, err = self._verified_base_url(host_id)
         if base is None:
-            return False, "Host not found on the LAN (is it online and running PrintLink?)"
+            log.warning("request_share: %s", err)
+            return False, err
         try:
-            log.info("request_share: pinging %s", base)
-            ping = requests.get(f"{base}/ping", timeout=CONNECT_TIMEOUT_S)
-            ping_j = _safe_json(ping)
-            if ping.status_code != 200 or "id" not in ping_j:
-                log.warning("request_share: bad /ping from %s: HTTP %d %r",
-                            base, ping.status_code, ping.text[:120])
-                return False, "Host did not answer its /ping properly."
-            if normalize_id(ping_j.get("id", "")) != normalize_id(host_id):
-                log.warning("request_share: ID mismatch at %s (got %r)",
-                            base, ping_j.get("id"))
-                return False, f"ID mismatch: that IP answers as {ping_j.get('id')}."
             log.info("request_share: POST %s/request-share alias=%r days=%d",
                      base, printer_alias, days)
             r = requests.post(f"{base}/request-share", json={
@@ -156,13 +202,21 @@ class Sender:
                    and r["printer_alias"] == printer_alias), None)
         if rp is None:
             return False, "printer not in list"
-        base = self._base_url(host_id)
+        base, err = self._verified_base_url(host_id)
         if base is None:
-            return False, "host unreachable — local entry removed anyway"
+            return False, f"{err} — local entry removed anyway"
+        payload: dict = {"sender_id": self.my_id,
+                         "printer_alias": printer_alias}
+        nonce = self._challenge(base)
+        if nonce:
+            # 0.3 host: prove ownership without sending the token
+            payload["nonce"] = nonce
+            payload["signature"] = sign_nonce(rp["token"], nonce)
+        else:
+            payload["token"] = rp["token"]   # pre-0.3 host
         try:
-            r = requests.post(f"{base}/revoke-grant", json={
-                "sender_id": self.my_id, "printer_alias": printer_alias,
-                "token": rp["token"]}, timeout=CONNECT_TIMEOUT_S)
+            r = requests.post(f"{base}/revoke-grant", json=payload,
+                              timeout=CONNECT_TIMEOUT_S)
             log.info("revoke_share %s '%s': HTTP %d", host_id, printer_alias,
                      r.status_code)
             if r.status_code == 200:
@@ -212,23 +266,34 @@ class Sender:
         recover). Permanent (give up immediately): HTTP 400/403/500 etc. —
         the receiver answered and the job cannot succeed as-is.
         """
-        base = self._base_url(host_id)
+        base, err = self._verified_base_url(host_id)
         rp = self.db.get_remote_printer(host_id, printer_alias)
         if base is None or rp is None:
-            log.warning("send %s: no route to %s (base=%s rp=%s)",
-                        filepath, host_id, base, "missing" if rp is None else "ok")
+            log.warning("send %s: no verified route to %s (base=%s rp=%s)",
+                        filepath, host_id,
+                        "ok" if base else err, "missing" if rp is None else "ok")
             return False, True
         try:
             with open(filepath, "rb") as f:
                 raw = f.read()
             payload = encrypt_payload(raw, rp["token"])
-            log.info("send %s -> %s/print (%d -> %d encrypted bytes, alias=%s)",
-                     filepath, base, len(raw), len(payload), printer_alias)
+            headers = {"X-Sender-ID": self.my_id}
+            nonce = self._challenge(base)
+            if nonce:
+                # 0.3: prove possession of the token; never send it
+                headers["X-Token-Hint"] = token_hint(rp["token"])
+                headers["X-Nonce"] = nonce
+                headers["X-Signature"] = sign_nonce(rp["token"], nonce)
+            else:
+                headers["X-Token"] = rp["token"]   # pre-0.3 host
+            log.info("send %s -> %s/print (%d -> %d encrypted bytes, alias=%s, auth=%s)",
+                     filepath, base, len(raw), len(payload), printer_alias,
+                     "hmac" if nonce else "legacy")
             data = None
             if options:
                 data = {"options": json.dumps(options)}
             r = requests.post(f"{base}/print",
-                              headers={"X-Sender-ID": self.my_id, "X-Token": rp["token"]},
+                              headers=headers,
                               files={"file": (Path(filepath).name, payload)},
                               data=data,
                               timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))

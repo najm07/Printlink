@@ -19,15 +19,19 @@ from flask import Flask, request, jsonify
 from cryptography.exceptions import InvalidTag
 
 from db import Database
-from shares import create_grant, authorize_print, revoke_remote_share, DEFAULT_SHARE_DAYS
+from shares import (create_grant, authorize_print, authorize_print_proof,
+                    revoke_remote_share, revoke_remote_share_proof,
+                    DEFAULT_SHARE_DAYS)
 from printer_local import (printer_status, print_via_shell,
                            print_text, print_emf, print_word, print_image,
                            print_pdf, sniff_format, extract_emf,
                            DEFAULT_OPTIONS)
-from identity import normalize_id
+from identity import is_valid_id, normalize_id
 from crypto import decrypt_payload
+from auth import new_nonce
 from config import (LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME, VERSION,
-                    MAX_SHARE_DAYS, RATE_SHARE_WINDOW_S, RATE_SHARE_MAX)
+                    MAX_SHARE_DAYS, RATE_SHARE_WINDOW_S, RATE_SHARE_MAX,
+                    AUTH_NONCE_TTL_S, AUTH_MAX_NONCES, LEGACY_TOKEN_AUTH)
 from logutil import get_logger, clean
 
 log = get_logger("server")
@@ -77,10 +81,68 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
                 share_hits.pop(k, None)
         return False
 
+    # Single-use auth challenges: nonce -> expiry (monotonic). Lost on
+    # restart by design — senders fetch a fresh challenge per attempt.
+    nonces: dict[str, float] = {}
+    _legacy_warned: set[str] = set()
+
+    def _issue_nonce(sender_id: str) -> str | None:
+        if not is_valid_id(sender_id):
+            return None
+        now = time.monotonic()
+        expired = [k for k, exp in nonces.items() if exp < now]
+        for k in expired:
+            nonces.pop(k, None)
+        while len(nonces) >= AUTH_MAX_NONCES:
+            nonces.pop(min(nonces, key=lambda k: nonces[k]))
+        nonce = new_nonce()
+        nonces[nonce] = now + AUTH_NONCE_TTL_S
+        return nonce
+
+    def _take_nonce(nonce: str) -> bool:
+        """Pop a stored nonce; True when it existed and was still fresh."""
+        exp = nonces.pop(nonce, None)
+        return exp is not None and exp >= time.monotonic()
+
+    def _warn_legacy_once(sender_id: str) -> None:
+        if sender_id not in _legacy_warned:
+            _legacy_warned.add(sender_id)
+            log.warning("sender %s used legacy X-Token auth (pre-0.3 agent) "
+                        "— ask them to update PrintLink", clean(sender_id))
+
+    def _authenticate(sender_id: str) -> dict:
+        """HMAC proof preferred; legacy X-Token header tolerated until the
+        fleet has updated (config.LEGACY_TOKEN_AUTH)."""
+        hint = request.headers.get("X-Token-Hint", "")
+        nonce = request.headers.get("X-Nonce", "")
+        sig = request.headers.get("X-Signature", "")
+        if hint and nonce and sig:
+            if not _take_nonce(nonce):
+                return {"ok": False, "error": "invalid or expired challenge"}
+            return authorize_print_proof(db, sender_id, hint, nonce, sig)
+        legacy = request.headers.get("X-Token", "")
+        if legacy:
+            if LEGACY_TOKEN_AUTH:
+                _warn_legacy_once(sender_id)
+                return authorize_print(db, sender_id, legacy)
+            return {"ok": False,
+                    "error": "legacy token auth disabled; update PrintLink"}
+        return {"ok": False, "error": "missing credentials"}
+
     @app.get("/ping")
     def ping():
         log.info("GET /ping from %s", request.remote_addr)
         return jsonify({"id": my_id, "ok": True, "version": VERSION})
+
+    @app.get("/auth-challenge")
+    def auth_challenge():
+        sender_id = normalize_id(request.args.get("sender_id", ""))
+        nonce = _issue_nonce(sender_id)
+        if nonce is None:
+            return jsonify({"error": "bad sender_id"}), 400
+        log.info("GET /auth-challenge from %s (sender %s)",
+                 request.remote_addr, sender_id)
+        return jsonify({"nonce": nonce})
 
     @app.get("/printers")
     def printers():
@@ -139,10 +201,21 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     def revoke_grant():
         data = request.get_json(force=True)
         sender_id = normalize_id(data.get("sender_id", ""))
-        alias = clean(data.get("printer_alias"))
-        token = data.get("token", "")
+        alias_raw = data.get("printer_alias", "")
+        alias = clean(alias_raw)
         log.info("POST /revoke-grant from %s for '%s'", request.remote_addr, alias)
-        res = revoke_remote_share(db, sender_id, alias, token)
+        nonce, sig = data.get("nonce"), data.get("signature")
+        if nonce and sig:
+            if not _take_nonce(nonce):
+                res = {"ok": False, "error": "invalid or expired challenge"}
+            else:
+                res = revoke_remote_share_proof(db, sender_id, alias_raw,
+                                                nonce, sig)
+        elif data.get("token"):
+            _warn_legacy_once(sender_id)
+            res = revoke_remote_share(db, sender_id, alias_raw, data["token"])
+        else:
+            res = {"ok": False, "error": "missing credentials"}
         if not res["ok"]:
             log.warning("revoke-grant FAILED for %s '%s': %s",
                         sender_id, alias, res["error"])
@@ -152,11 +225,10 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
 
     @app.post("/print")
     def receive_print():
-        sender_id = request.headers.get("X-Sender-ID", "")
-        token = request.headers.get("X-Token", "")
-        log.info("POST /print from %s (sender_id=%s token=%s...)", request.remote_addr,
-                 sender_id, (token[:8] + "…") if token else "MISSING")
-        auth = authorize_print(db, sender_id, token)
+        sender_id = normalize_id(request.headers.get("X-Sender-ID", ""))
+        log.info("POST /print from %s (sender_id=%s)", request.remote_addr,
+                 sender_id)
+        auth = _authenticate(sender_id)
         if not auth["ok"]:
             log.warning("print auth FAILED for %s: %s", sender_id, auth["error"])
             return jsonify({"error": auth["error"]}), 403
