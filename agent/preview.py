@@ -11,7 +11,7 @@ Threading contract
 Tk widgets may ONLY be created on the thread that owns the Tk root.
 
 - Tray mode:  the tray owns the one root + mainloop on the main thread.
-  Worker threads (pipe_reader, sender retry loop) must marshal the call with
+  Worker threads (sender retry loop) must marshal the call with
   root.after(...) — the same pattern tray.py uses for the share accept/refuse
   dialog — and pass parent=<tray root>. ask_print_options then blocks the
   CALLING thread until the dialog closes.
@@ -286,7 +286,7 @@ class PreviewDialog:
             self.top.transient(master.winfo_toplevel())
             self.top.grab_set()          # modal: no clicking back into tray
 
-        fonts = _setup_style(self.top)
+        _setup_style(self.top)
         self.top.configure(background=BG_APP)
         self.top.title(f"Print with PrintLink — {os.path.basename(filepath)}")
         self.top.resizable(False, False)

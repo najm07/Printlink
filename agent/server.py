@@ -18,7 +18,7 @@ from cryptography.exceptions import InvalidTag
 
 from db import Database
 from shares import create_grant, authorize_print, revoke_remote_share, DEFAULT_SHARE_DAYS
-from printer_local import (list_printers, printer_status, print_via_shell,
+from printer_local import (printer_status, print_via_shell,
                            print_text, print_emf, print_word, print_image,
                            print_pdf, sniff_format, extract_emf,
                            DEFAULT_OPTIONS)

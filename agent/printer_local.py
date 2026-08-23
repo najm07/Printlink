@@ -68,7 +68,6 @@ def printer_status(printer_name: str) -> dict:
     try:
         info = win32print.GetPrinter(h, 2)
         status = info["Status"]
-        attrs = info["Attributes"]
         return {
             "name": printer_name,
             "offline": bool(status & win32print.PRINTER_STATUS_OFFLINE),

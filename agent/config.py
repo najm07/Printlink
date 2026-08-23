@@ -40,10 +40,6 @@ CONNECT_TIMEOUT_S = 4
 READ_TIMEOUT_S = 180               # host replies only after printing finishes
 MAX_JOB_MB = 100
 
-# --- named pipe (port monitor <-> agent) ---
-PIPE_NAME = r"\\.\pipe\\PrintLinkSender"
-PIPE_CONNECT_WAIT_MS = 20000
-
 # --- shares ---
 DEFAULT_SHARE_DAYS = 7
 MAX_SHARE_DAYS = 90
@@ -54,7 +50,6 @@ RETRY_INTERVAL_S = 15
 RETRY_MAX_ATTEMPTS = 20            # ~5 minutes of retrying
 
 # --- temp spool dirs ---
-OUTBOX_DIR_NAME = "printlink_outbox"   # sender side (from port monitor)
 INBOX_DIR_NAME = "printlink_jobs"      # host side (received uploads)
 
 

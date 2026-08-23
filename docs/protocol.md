@@ -74,25 +74,11 @@ The host checks, in order: token known -> not revoked -> not expired (marks
 not offline -> decrypt -> spool -> reply. The reply is sent only after the job
 finishes printing locally, hence the 180s client read timeout.
 
-## 3. Legacy: named pipe framing (retired)
+## 3. Legacy named-pipe framing — removed
 
-The port monitor and its pipe (`\\.\pipe\PrintLinkSender`) were retired when
-PrintLink moved to direct send (0.2.0). This section documents the old framing
-for anyone running the legacy `pipe_reader.py` (`LEGACY_PIPE_ENV=1`).
-
-The monitor opened one connection per job and wrote:
-
-```
-[4B  uint32  job-name length N]
-[N B         job name, UTF-8]           (e.g. "PrintLink Remote Printer")
-[8B  uint64  payload length]            (0 = unknown: read until pipe close)
-[...         payload bytes]             (XPS from the Microsoft driver)
-```
-
-End of job = monitor closes its pipe handle. The agent saved the payload to
-`%TEMP%\printlink_outbox\<unixtime>_<rand>.<ext>` and enqueued it for the
-tray-selected default remote printer. If none was selected, the file was
-deleted and the job discarded. This path is not used by the current agent.
+The port monitor and its pipe (`\\.\pipe\PrintLinkSender`) were retired in
+0.2.0 when PrintLink moved to direct send; the pipe reader itself was deleted
+in 0.3.0. See git history or `docs/debugging-notes.md` for how it worked.
 
 ## 4. Pairing token
 

@@ -1,15 +1,19 @@
 ; PrintLink installer — Inno Setup 6 script
-; Single install type: the tray agent. The port monitor / virtual printer
-; (0.1.x) was removed — jobs are now delivered directly by the agent via the
-; right-click verb + preview dialog.
+; Single install type: the tray agent.
+;
+; The version is defined by agent/config.py (single source of truth).
+; scripts/build.ps1 passes /DMyAppVersion=<v>; the fallback below only exists
+; so `iscc printlink.iss` still works for quick local builds.
 ;
 ; Prerequisites on build machine:
 ;   dist\PrintLinkAgent.exe   (PyInstaller onefile bundle, see PrintLinkAgent.spec)
 ;
-; Build:  iscc printlink.iss
+; Build:  pwsh scripts\build.ps1      (or: iscc printlink.iss)
 
+#ifndef MyAppVersion
+  #define MyAppVersion "0.2.7"
+#endif
 #define MyAppName      "PrintLink"
-#define MyAppVersion   "0.2.7"
 #define MyAppPublisher "PrintLink"
 #define MyAppExeName   "PrintLinkAgent.exe"
 

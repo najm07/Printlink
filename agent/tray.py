@@ -48,7 +48,9 @@ def _dialog(fn):
 
 def _notify(title: str, msg: str):
     def _w():
-        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
         messagebox.showinfo(title, msg)
         root.destroy()
     threading.Thread(target=_w, daemon=True).start()
@@ -199,7 +201,8 @@ class PrintLinkTray:
             return
 
         def ui(root):
-            win = tk.Toplevel(root); win.title("Select remote printer")
+            win = tk.Toplevel(root)
+            win.title("Select remote printer")
             win.attributes("-topmost", True)
             lb = tk.Listbox(win, width=70)
             for r in rows:
@@ -237,15 +240,21 @@ class PrintLinkTray:
             if not available:
                 messagebox.showinfo("PrintLink", "All local printers are already shared.")
                 return None
-            win = tk.Toplevel(root); win.title("Share a printer"); win.attributes("-topmost", True)
+            win = tk.Toplevel(root)
+            win.title("Share a printer")
+            win.attributes("-topmost", True)
             tk.Label(win, text="Printer:").grid(row=0, column=0, padx=6, pady=6)
             cb = ttk.Combobox(win, values=available, state="readonly", width=38)
-            cb.grid(row=0, column=1, padx=6); cb.current(0)
+            cb.grid(row=0, column=1, padx=6)
+            cb.current(0)
             tk.Label(win, text="Share as (alias):").grid(row=1, column=0, padx=6)
-            alias = tk.Entry(win, width=40); alias.insert(0, cb.get()); alias.grid(row=1, column=1, padx=6)
+            alias = tk.Entry(win, width=40)
+            alias.insert(0, cb.get())
+            alias.grid(row=1, column=1, padx=6)
             out = {}
             def ok():
-                out["v"] = (cb.get(), alias.get().strip()); win.destroy()
+                out["v"] = (cb.get(), alias.get().strip())
+                win.destroy()
             tk.Button(win, text="Share", command=ok).grid(row=2, column=1, sticky="e", padx=6, pady=8)
             win.wait_window()
             return out.get("v")
@@ -259,8 +268,11 @@ class PrintLinkTray:
         def ui(root):
             grants = self.db.list_grants()
             if not grants:
-                messagebox.showinfo("PrintLink", "No grants yet."); return None
-            win = tk.Toplevel(root); win.title("Manage grants"); win.attributes("-topmost", True)
+                messagebox.showinfo("PrintLink", "No grants yet.")
+                return None
+            win = tk.Toplevel(root)
+            win.title("Manage grants")
+            win.attributes("-topmost", True)
             lb = tk.Listbox(win, width=74)
             for g in grants:
                 lb.insert("end", f"[{g['status']}] {g['remote_id']} ({g['remote_name']}) → "
@@ -321,7 +333,8 @@ class PrintLinkTray:
                 messagebox.showinfo("PrintLink", "No shared printers yet. Use "
                                                  "'Share a printer...'.")
                 return None
-            win = tk.Toplevel(root); win.title("My shared printers")
+            win = tk.Toplevel(root)
+            win.title("My shared printers")
             win.attributes("-topmost", True)
             lb = tk.Listbox(win, width=74)
             for p in shared:
@@ -403,7 +416,8 @@ class PrintLinkTray:
             return
 
         def ui(root):
-            win = tk.Toplevel(root); win.title("Manage remote printers")
+            win = tk.Toplevel(root)
+            win.title("Manage remote printers")
             win.attributes("-topmost", True)
             lb = tk.Listbox(win, width=74)
             for r in rows:

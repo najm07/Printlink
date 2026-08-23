@@ -1,0 +1,21 @@
+# PrintLink lint config: correctness-focused, deliberately not style-police.
+#
+# The agent intentionally uses broad `except Exception`/`except-pass` blocks
+# for best-effort GUI, spooler, and cleanup calls (a print tool must never
+# crash over a notification failure), and stores naive UTC datetime strings
+# by convention (see docs/protocol.md). Rule families that fight those
+# choices (BLE, S11x, DTZ, PLW) therefore stay off; E/F/B catch real bugs.
+line-length = 92
+target-version = "py312"
+extend-exclude = [
+    ".venv", ".venv-1", "build", "dist", "graphify-out",
+    "port-monitor", "site",
+]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "B"]
+
+[lint.per-file-ignores]
+# Asserting broad exceptions around sqlite/win32 behavior is the point there,
+# and several suites must stub sys.modules BEFORE importing agent modules.
+"tests/*" = ["B017", "E402"]

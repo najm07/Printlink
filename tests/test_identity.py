@@ -1,5 +1,4 @@
 import json
-import pytest
 from identity import generate_id, normalize_id, is_valid_id, load_or_create_id
 
 

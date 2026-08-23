@@ -1,0 +1,4 @@
+# Development environment: runtime deps + test/lint tooling.
+-r agent/requirements.txt
+pytest==9.1.1
+ruff==0.16.4

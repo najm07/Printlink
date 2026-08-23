@@ -51,17 +51,12 @@ docs/          architecture.md, protocol.md, security.md, debugging-notes.md
 tests/         pytest suite
 ```
 
-`agent/pipe_reader.py` is legacy code from the retired port monitor: it is
-**not used by the shipping product**. It only activates if the agent is
-started with `LEGACY_PIPE_ENV=1` (see `main.py`); kept for anyone still
-running an old port monitor.
-
 ## Development setup
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r agent/requirements.txt
+pip install -r requirements-dev.txt
 python agent/main.py
 ```
 
@@ -77,6 +72,14 @@ python -m pytest tests/
 
 ## Building the installer
 
+One command (reads the version from `agent/config.py` — no sync needed):
+
+```powershell
+pwsh scripts/build.ps1
+```
+
+Manual equivalent:
+
 1. Bundle the agent:
 
    ```powershell
@@ -89,7 +92,7 @@ python -m pytest tests/
 2. Build the installer:
 
    ```powershell
-   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\printlink.iss
+   & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=<version> installer\printlink.iss
    ```
 
    Produces `installer\output\PrintLinkSetup-<version>.exe`.

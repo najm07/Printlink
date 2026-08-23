@@ -10,7 +10,6 @@ Run:  python main.py            (dev)
 Install: packaged exe registered in HKCU\\...\\Run for auto-start.
 """
 import argparse
-import os
 import socket
 import sys
 import threading
@@ -22,7 +21,6 @@ from discovery import Discovery
 from server import create_app, run_in_thread
 from sender import Sender
 from shares import sweep_expired_grants
-from pipe_reader import PipeReader
 from cli import (install_shell_verbs, uninstall_shell_verbs,
                  resolve_send_target, check_send_file,
                  save_selected_target, load_selected_target,
@@ -32,11 +30,6 @@ from config import (DATA_DIR, LISTEN_PORT, SWEEP_INTERVAL_S, ensure_dirs)
 from logutil import setup_logging, get_logger
 
 log = get_logger("main")
-
-# Port-monitor integration is legacy/optional: the direct-send path never
-# touches the Windows spooler. Set this env var (any value) to re-enable the
-# named-pipe reader for installations that still have the old virtual printer.
-LEGACY_PIPE_ENV = "PRINTLINK_LEGACY_PIPE"
 
 
 def _expiry_sweeper(db: Database, stop: threading.Event):
@@ -183,21 +176,13 @@ def _cmd_tray() -> None:
     # 4. sender (client side, retry queue)
     sender = Sender(db, my_id, my_name, discovery.resolve)
 
-    # 4b. legacy port-monitor pipe (opt-in; direct send never uses it)
+    # 4b. persisted send-target (shared with one-shot --send processes)
     selected_target = {"value": None}
     persisted = load_selected_target(db)
     if persisted:
         selected_target["value"] = persisted
         log.info("tray target seeded from persisted selection: %s @ %s",
                  persisted[1], persisted[0])
-    if os.environ.get(LEGACY_PIPE_ENV, "0") == "1":
-        pipe_reader = PipeReader(sender, get_target=lambda: selected_target["value"])
-        pipe_reader.start()
-        log.warning("%s=1: legacy port-monitor pipe ENABLED", LEGACY_PIPE_ENV)
-    else:
-        pipe_reader = None
-        log.info("legacy port-monitor pipe disabled (set %s=1 to enable)",
-                 LEGACY_PIPE_ENV)
 
     # 5. background expiry enforcement
     sweeper = threading.Thread(target=_expiry_sweeper, args=(db, stop),
@@ -208,8 +193,6 @@ def _cmd_tray() -> None:
     def on_quit():
         stop.set()
         sender.stop()
-        if pipe_reader is not None:
-            pipe_reader.stop()
         discovery.close()
 
     def on_delivered(filepath, host_id, alias, reason=None):

@@ -35,9 +35,6 @@ Access via pairwise grants with pairing tokens and automatic expiry (default
 +-----------------------------------------------------------------+
 ```
 
-`pipe_reader.py` is legacy code from the retired port monitor: not used by the
-shipping product, only activated with `LEGACY_PIPE_ENV=1`.
-
 Since 0.2.3 all agent data lives machine-wide in `%PROGRAMDATA%\PrintLink` so
 every Windows account on a PC sees the same printers, grants, and identity
 (falls back to per-user `%LOCALAPPDATA%` when not writable). See
