@@ -1,6 +1,7 @@
 """End-to-end API tests: real Flask app + test client, pywin32 stubbed."""
 import io
 import sys
+import time
 import types
 from datetime import datetime, timedelta, timezone
 import pytest
@@ -343,7 +344,11 @@ def test_expired_nonce_rejected(env, monkeypatch):
     monkeypatch.setattr(server_mod, "AUTH_NONCE_TTL_S", 0)
     client, _db = env
     token = request_share(client).get_json()["token"]
-    r = _do_print_proof(client, token)   # TTL 0 -> already stale when used
+    nonce = _challenge(client)
+    # Windows' time.monotonic() ticks at ~15.6 ms under Python <=3.12; a
+    # zero-TTL nonce only looks stale once the clock has actually advanced.
+    time.sleep(0.05)
+    r = _do_print_proof(client, token, nonce=nonce)
     assert r.status_code == 403
     assert r.get_json()["error"] == "invalid or expired challenge"
 
