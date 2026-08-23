@@ -13,7 +13,6 @@ import argparse
 import socket
 import sys
 import threading
-import time
 
 from identity import load_or_create_id
 from db import Database
@@ -34,16 +33,16 @@ log = get_logger("main")
 
 
 def _expiry_sweeper(db: Database, stop: threading.Event):
-    """Mark overdue grants expired every hour; also expire our client-side
-    remote_printers rows so the user sees accurate status."""
+    """Hourly background job: mark OUR host-side grants expired.
+
+    Deliberately does NOT touch client-side remote_printers rows: the host
+    is authoritative about expiry (it re-checks every job and may have
+    extended a grant we can't see), so flipping local statuses to 'expired'
+    only created stale lockouts. Honesty in the UI comes from displaying
+    the expires_at date, not from mutating state."""
     while not stop.wait(SWEEP_INTERVAL_S):
         try:
             n = sweep_expired_grants(db)
-            now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-            with db.connect_private() as con:
-                con.execute(
-                    "UPDATE remote_printers SET status='expired' "
-                    "WHERE status='active' AND expires_at < ?", (now,))
             if n:
                 print(f"[PrintLink] swept {n} expired grant(s)")
         except Exception as e:

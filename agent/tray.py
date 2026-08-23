@@ -5,6 +5,7 @@ daemon threads started by main.py. Tkinter dialogs are created on demand
 in short-lived threads (Tk must not conflict with the pystray loop).
 """
 import threading
+import time
 import tkinter as tk
 from tkinter import simpledialog, messagebox, ttk
 from pathlib import Path
@@ -509,9 +510,14 @@ class PrintLinkTray:
             _notify("PrintLink", f"'{label}' removed.{revoke_msg}")
 
     def _list_remotes(self, *_):
+        # status column stays 'active' since 0.3 (host is authoritative);
+        # honesty comes from comparing the stored expiry date
+        now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         rows = self.db.list_remote_printers(status=None)
-        text = "\n".join(f"[{r['status']}] {remote_label(r)} "
-                         f"({r['host_ip']}) until {r['expires_at']}" for r in rows) or "None."
+        text = "\n".join(
+            f"[{'overdue' if r['expires_at'] < now else r['status']}] "
+            f"{remote_label(r)} ({r['host_ip']}) until {r['expires_at']}"
+            for r in rows) or "None."
         _notify("PrintLink — my remote printers", text)
 
     def _quit(self, *_):

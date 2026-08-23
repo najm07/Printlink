@@ -63,6 +63,8 @@ def test_unshared_printer_denies(setup):
 
 
 def test_client_side_checks(tmp_path):
+    """0.3+ contract: local time-expiry is advisory (host decides on the
+    real request); only missing/revoked entries block pre-flight."""
     db = Database(tmp_path / "t.db")
     exp = (_utcnow() + timedelta(days=7)).strftime(EXP)
     store_accepted_share(db, "777 888 999", "Host-PC", "192.168.1.50", "Office-HP", "tok", exp)
@@ -70,7 +72,12 @@ def test_client_side_checks(tmp_path):
     assert not get_usable_printer(db, "777 888 999", "Nope")["ok"]
     past = (_utcnow() - timedelta(days=1)).strftime(EXP)
     store_accepted_share(db, "777 888 999", "Host-PC", "192.168.1.50", "Office-HP", "tok", past)
-    assert get_usable_printer(db, "777 888 999", "Office-HP")["error"].startswith("share expired")
+    res = get_usable_printer(db, "777 888 999", "Office-HP")
+    assert res["ok"] and res.get("stale") is True
+    # revoked still hard-blocks
+    with db.connect_private() as con:
+        con.execute("UPDATE remote_printers SET status='revoked'")
+    assert get_usable_printer(db, "777 888 999", "Office-HP")["error"] == "share was revoked"
 
 
 def test_store_accepted_share_with_name(tmp_path):

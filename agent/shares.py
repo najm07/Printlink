@@ -12,6 +12,9 @@ from identity import normalize_id
 from config import DEFAULT_SHARE_DAYS
 from crypto import new_pairing_token
 from auth import token_hint, verify_nonce
+from logutil import get_logger
+
+log = get_logger("shares")
 
 
 def _utcnow() -> datetime:
@@ -130,12 +133,23 @@ def store_accepted_share(db: Database, host_id: str, host_name: str, host_ip: st
 
 
 def get_usable_printer(db: Database, host_id: str, printer_alias: str) -> dict:
-    """Check before sending a job. Mirrors authorize_print on the client side."""
+    """Pre-flight check before sending a job.
+
+    The HOST is authoritative about expiry — it re-checks on every job and
+    its verdict comes back as the HTTP status. A locally-overdue row is
+    therefore only a *stale* hint (the host may have extended the grant,
+    which we can't see): we let the attempt through and flag it. Only a
+    genuinely missing or revoked entry blocks before the network."""
     rp = db.get_remote_printer(normalize_id(host_id), printer_alias)
     if rp is None:
         return {"ok": False, "error": "printer not added"}
-    if rp["status"] != "active":
-        return {"ok": False, "error": f"share is {rp['status']}"}
-    if _utcnow() > datetime.strptime(rp["expires_at"], "%Y-%m-%d %H:%M:%S"):
-        return {"ok": False, "error": "share expired — request it again"}
-    return {"ok": True, "remote": rp}
+    if rp["status"] == "revoked":
+        return {"ok": False, "error": "share was revoked"}
+    stale = _utcnow() > datetime.strptime(rp["expires_at"], "%Y-%m-%d %H:%M:%S")
+    if stale:
+        log.debug("local grant for %s@%s looks overdue; letting the host decide",
+                  printer_alias, normalize_id(host_id))
+    out = {"ok": True, "remote": rp}
+    if stale or rp["status"] != "active":
+        out["stale"] = True
+    return out
