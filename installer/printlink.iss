@@ -73,7 +73,8 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Start PrintLink now"; \
     Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Remove the right-click verb (HKCU, per-user)
+; Remove the right-click verb (HKLM first, then HKCU fallback — same order
+; the installer's --install-verbs wrote them)
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--uninstall-verbs"; \
     Flags: runhidden waituntilterminated
 Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""PrintLink Agent"""; \
@@ -83,8 +84,9 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""PrintLin
 
 [UninstallDelete]
 ; Remove the agent binary; keep user data (identity + DB) so re-installs
-; keep the same PC ID — delete manually from %LOCALAPPDATA%\PrintLink if desired
+; keep the same PC ID — delete manually from %PROGRAMDATA%\PrintLink if desired
 Type: files; Name: "{app}\{#MyAppExeName}"
-; Drop the persisted send-target preference (re-pick in the tray after reinstall)
-Type: files; Name: "{localappdata}\PrintLink\target.json"
+; Drop the persisted send-target preference (re-pick in the tray after reinstall);
+; since 0.2.3 it lives machine-wide, next to the DB
+Type: files; Name: "{commonappdata}\PrintLink\target.json"
 

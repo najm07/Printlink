@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from identity import normalize_id
+from identity import normalize_id, write_json_atomic
 from config import MAX_JOB_MB, TARGET_FILE
 from logutil import get_logger
 
@@ -107,9 +107,8 @@ def save_selected_target(host_id: str, printer_alias: str, path=None) -> None:
     (Explorer context menu) can use it without --target."""
     p = Path(path) if path else TARGET_FILE
     try:
-        p.write_text(json.dumps({"host_id": normalize_id(host_id),
-                                 "printer_alias": printer_alias}),
-                     encoding="utf-8")
+        write_json_atomic(p, {"host_id": normalize_id(host_id),
+                              "printer_alias": printer_alias})
         log.info("persisted target: %s @ %s", printer_alias, host_id)
     except OSError:
         log.warning("could not persist target to %s", p)

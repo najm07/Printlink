@@ -233,6 +233,32 @@ def _sumatra_settings(opts: dict) -> str:
     return ",".join(parts)
 
 
+def _winword_pids() -> set[int]:
+    """PIDs of currently running WINWORD.EXE processes; empty set when the
+    query fails (tasklist missing/odd output), which disables the targeted
+    timeout kill rather than misfiring it."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq WINWORD.EXE",
+             "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    pids: set[int] = set()
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split('","')
+        if len(parts) >= 2 and parts[0].strip('"').upper() == "WINWORD.EXE" \
+                and parts[1].strip('"').isdigit():
+            pids.add(int(parts[1].strip('"')))
+    return pids
+
+
+def new_pids(before: set[int], after: set[int]) -> list[int]:
+    """Word processes WE started = appeared after our snapshot."""
+    return sorted(after - before)
+
+
 def print_word(filepath: str, printer_name: str, opts: dict | None = None,
                timeout: int = 180) -> None:
     """Print a Word document (.docx/.doc) via Word COM automation.
@@ -240,6 +266,12 @@ def print_word(filepath: str, printer_name: str, opts: dict | None = None,
     Honors copies and page range ("1-3,5"); paper/color follow the document
     and driver defaults. Requires Microsoft Word on the host. Runs in a
     watchdog thread so a hung Word cannot block the HTTP handler.
+
+    On timeout we kill only the WINWORD.EXE instance(s) started by this
+    call — never the user's own open Word windows (they may hold unsaved
+    work). DispatchEx forces a fresh instance instead of attaching to an
+    already-running one, so "PIDs that appeared since the snapshot" are
+    ours with high confidence.
     """
     opts = {**DEFAULT_OPTIONS, **(opts or {})}
     import pythoncom
@@ -258,7 +290,7 @@ def print_word(filepath: str, printer_name: str, opts: dict | None = None,
         pythoncom.CoInitialize()
         word = None
         try:
-            word = win32com.client.Dispatch("Word.Application")
+            word = win32com.client.DispatchEx("Word.Application")
             word.Visible = False
             word.DisplayAlerts = 0
             try:
@@ -292,12 +324,16 @@ def print_word(filepath: str, printer_name: str, opts: dict | None = None,
                     pass
             pythoncom.CoUninitialize()
 
+    before = _winword_pids()
     t = threading.Thread(target=worker, daemon=True)
     t.start()
     t.join(timeout)
     if t.is_alive():
-        subprocess.run(["taskkill", "/IM", "WINWORD.EXE", "/F"],
-                       capture_output=True)
+        for pid in new_pids(before, _winword_pids()):
+            log.warning("print_word: timed out after %ds; killing our "
+                        "WINWORD.EXE pid %d", timeout, pid)
+            subprocess.run(["taskkill", "/PID", str(pid), "/F", "/T"],
+                           capture_output=True)
         raise RuntimeError(f"Word print timed out after {timeout}s")
     if "error" in result:
         raise RuntimeError(result["error"])
@@ -404,18 +440,28 @@ def _run_gdi_print(path: str, printer_name: str, opts: dict | None = None,
     opts = {**DEFAULT_OPTIONS, **(opts or {})}
     import subprocess
     import tempfile
-    script = os.path.join(tempfile.gettempdir(), "pl_print_emf.ps1")
-    with open(script, "w", encoding="utf-8") as f:
-        f.write(_EMF_PRINT_PS)
-    r = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-         "-File", script, "-Path", path, "-Printer", printer_name,
-         "-Paper", str(opts.get("paper") or ""),
-         "-Orientation", str(opts.get("orientation") or "auto"),
-         "-Color", str(opts.get("color") or "color"),
-         "-Fit", str(opts.get("fit") or "fit"),
-         "-Copies", str(max(1, int(opts.get("copies") or 1)))],
-        capture_output=True, timeout=timeout)
+
+    # Unique script per call: the HTTP server is threaded, and two concurrent
+    # image/EMF jobs sharing one fixed .ps1 path can race a torn read.
+    fd, script = tempfile.mkstemp(suffix=".ps1")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(_EMF_PRINT_PS)
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass",
+             "-File", script, "-Path", path, "-Printer", printer_name,
+             "-Paper", str(opts.get("paper") or ""),
+             "-Orientation", str(opts.get("orientation") or "auto"),
+             "-Color", str(opts.get("color") or "color"),
+             "-Fit", str(opts.get("fit") or "fit"),
+             "-Copies", str(max(1, int(opts.get("copies") or 1)))],
+            capture_output=True, timeout=timeout)
+    finally:
+        try:
+            os.unlink(script)
+        except OSError:
+            pass
     if r.returncode != 0:
         err = r.stderr.decode("utf-8", "replace") + r.stdout.decode("utf-8", "replace")
         raise RuntimeError(f"GDI+ print failed: {err[:400]}")

@@ -24,6 +24,18 @@ from logutil import get_logger
 log = get_logger("sender")
 
 
+def _safe_json(resp) -> dict:
+    """JSON body as a dict, or {} when the peer answered non-JSON (proxy,
+    captive portal, HTML error page). json() raises ValueError, which is
+    NOT a RequestException — without this guard such replies crashed the
+    caller instead of surfacing as a normal failure."""
+    try:
+        j = resp.json()
+    except (ValueError, AttributeError):
+        return {}
+    return j if isinstance(j, dict) else {}
+
+
 class Sender:
     def __init__(self, db: Database, my_id: str, my_name: str, resolver,
                  on_delivered=None, on_failed=None, on_printer_error=None):
@@ -101,22 +113,31 @@ class Sender:
             return False, "Host not found on the LAN (is it online and running PrintLink?)"
         try:
             log.info("request_share: pinging %s", base)
-            ping = requests.get(f"{base}/ping", timeout=CONNECT_TIMEOUT_S).json()
-            if normalize_id(ping.get("id", "")) != normalize_id(host_id):
+            ping = requests.get(f"{base}/ping", timeout=CONNECT_TIMEOUT_S)
+            ping_j = _safe_json(ping)
+            if ping.status_code != 200 or "id" not in ping_j:
+                log.warning("request_share: bad /ping from %s: HTTP %d %r",
+                            base, ping.status_code, ping.text[:120])
+                return False, "Host did not answer its /ping properly."
+            if normalize_id(ping_j.get("id", "")) != normalize_id(host_id):
                 log.warning("request_share: ID mismatch at %s (got %r)",
-                            base, ping.get("id"))
-                return False, f"ID mismatch: that IP answers as {ping.get('id')}."
+                            base, ping_j.get("id"))
+                return False, f"ID mismatch: that IP answers as {ping_j.get('id')}."
             log.info("request_share: POST %s/request-share alias=%r days=%d",
                      base, printer_alias, days)
             r = requests.post(f"{base}/request-share", json={
                 "sender_id": self.my_id, "sender_name": self.my_name,
                 "printer_alias": printer_alias, "days": days}, timeout=60)
             log.info("request_share: HTTP %d -> %s", r.status_code,
-                     r.json().get("status", r.text[:200]))
+                     _safe_json(r).get("status", r.text[:200]))
         except requests.RequestException as e:
             log.warning("request_share: connection failed to %s: %r", base, e)
             return False, f"Connection failed: {e}"
-        j = r.json()
+        j = _safe_json(r)
+        if not j:
+            log.warning("request_share: non-JSON reply from %s: HTTP %d %r",
+                        host_id, r.status_code, r.text[:120])
+            return False, f"Host answered unexpectedly (HTTP {r.status_code})."
         if r.status_code == 200 and j.get("status") == "accepted":
             ip = base.split("//")[1].split(":")[0]
             store_accepted_share(self.db, host_id, "", ip, printer_alias,
@@ -170,8 +191,13 @@ class Sender:
         self._jobs.put((str(filepath), normalize_id(host_id), printer_alias, 0,
                         bool(delete_after), dict(options or {})))
         with self._lock:
+            was_idle = self._pending == 0
             self._pending += 1
-            self._ever_failed = False
+            if was_idle:
+                # A new drain cycle starts clean; never reset the latch while
+                # sibling jobs are still outstanding, or their failures would
+                # vanish from wait_idle's result.
+                self._ever_failed = False
             self._drained.clear()
         log.info("print_file %s queued for %s@%s (options=%r)",
                  filepath, printer_alias, host_id, options or {})

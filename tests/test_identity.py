@@ -30,3 +30,19 @@ def test_persistence(tmp_path):
 def test_regenerates_on_corrupt_config(tmp_path):
     (tmp_path / "identity.json").write_text('{"pc_id": "broken"}')
     assert is_valid_id(load_or_create_id(tmp_path))
+
+
+def test_regenerates_on_malformed_json(tmp_path):
+    """Old code crashed on unreadable JSON; now it regenerates (B4)."""
+    (tmp_path / "identity.json").write_text("{not json at all", encoding="utf-8")
+    assert is_valid_id(load_or_create_id(tmp_path))
+
+
+def test_atomic_write_leaves_no_temp_files(tmp_path):
+    """B4: identity.json must be written via temp+replace — a crash mid-write
+    used to be able to truncate the file and orphan every grant."""
+    for _ in range(3):
+        assert is_valid_id(load_or_create_id(tmp_path))
+    assert list(tmp_path.glob("*.tmp")) == []
+    data = json.loads((tmp_path / "identity.json").read_text(encoding="utf-8"))
+    assert is_valid_id(data["pc_id"])

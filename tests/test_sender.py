@@ -1,4 +1,11 @@
-"""Sender retry loop: printer-error notifications and failure reporting."""
+"""Sender retry loop: printer-error notifications and failure reporting.
+
+Also covers the audit fixes: graceful handling of non-JSON host responses
+(B3) and the failure-latch invariant that keeps wait_idle() honest while
+sibling jobs are still in flight (B6).
+"""
+import json
+import threading
 import requests
 import pytest
 
@@ -29,6 +36,11 @@ class FakeResp:
         self.status_code = code
         self.text = text
 
+    def json(self):
+        # requests raises JSONDecodeError (a ValueError) on bad bodies —
+        # mirror that so _safe_json's guard is exercised for real.
+        return json.loads(self.text)
+
 
 @pytest.fixture
 def fast_sender(monkeypatch):
@@ -38,7 +50,8 @@ def fast_sender(monkeypatch):
     def make(responses):
         calls = {"n": 0}
 
-        def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        def fake_post(url, headers=None, files=None, data=None, json=None,
+                      timeout=None):
             r = responses[min(calls["n"], len(responses) - 1)]
             calls["n"] += 1
             return r
@@ -92,3 +105,81 @@ def test_permanent_rejection_notifies_error_then_fails(fast_sender, tmp_path):
     _send(s, tmp_path)
     assert s.wait_idle(timeout=10) is False
     assert events == [("error", "paper out"), ("failed", "paper out")]
+
+
+# ---------- B3: non-JSON host responses must degrade to normal failures ----
+
+def test_request_share_tolerates_non_json_ping(fast_sender, monkeypatch):
+    s, _db = fast_sender([])
+    monkeypatch.setattr(
+        requests, "get",
+        lambda *a, **k: FakeResp(200, "<html>502 Bad Gateway</html>"))
+    ok, msg = s.request_share("111 222 333", "CANON", 7)
+    assert ok is False
+    assert "/ping" in msg
+
+
+def test_request_share_tolerates_non_json_reply(fast_sender, monkeypatch):
+    s, _db = fast_sender([FakeResp(502, "<html>proxy error page</html>")])
+    monkeypatch.setattr(
+        requests, "get",
+        lambda *a, **k: FakeResp(200, '{"id": "111 222 333", "ok": true}'))
+    ok, msg = s.request_share("111 222 333", "CANON", 7)
+    assert ok is False
+    assert "unexpectedly" in msg and "502" in msg
+
+
+def test_request_share_rejects_bad_ping_status(fast_sender, monkeypatch):
+    s, _db = fast_sender([])
+    monkeypatch.setattr(
+        requests, "get",
+        lambda *a, **k: FakeResp(404, '{"error": "nope"}'))
+    ok, msg = s.request_share("111 222 333", "CANON", 7)
+    assert ok is False
+    assert "/ping" in msg
+
+
+# ---------- B6: failure latch survives sibling enqueue mid-cycle -----------
+
+def _pause_worker(s):
+    """Keep the retry worker from completing jobs so the lock-state asserts
+    below are deterministic; release the Event to let the worker drain."""
+    release = threading.Event()
+
+    def stuck(*a, **k):
+        release.wait(5)
+        return False, False     # permanent failure once released
+
+    s._send_once = stuck
+    return release
+
+
+def test_failure_latch_not_reset_mid_cycle(fast_sender, tmp_path):
+    """Old code reset _ever_failed on EVERY print_file(); with a sibling job
+    still outstanding that erased its failure from wait_idle()'s verdict."""
+    s, _db = fast_sender([FakeResp(500, "boom")])
+    release = _pause_worker(s)
+    f = tmp_path / "b.pdf"
+    f.write_bytes(b"%PDF-1.4 x")
+    with s._lock:
+        s._pending = 1          # sibling job in flight mid-cycle...
+        s._ever_failed = True   # ...which has already failed once
+    assert s.print_file(f, "111222333", "CANON")[0]
+    with s._lock:
+        assert (s._pending, s._ever_failed) == (2, True)
+    release.set()
+
+
+def test_failure_latch_resets_on_new_drain_cycle(fast_sender, tmp_path):
+    """A fresh cycle (queue fully drained beforehand) starts clean again."""
+    s, _db = fast_sender([FakeResp(500, "boom")])
+    release = _pause_worker(s)
+    f = tmp_path / "c.pdf"
+    f.write_bytes(b"%PDF-1.4 x")
+    with s._lock:
+        s._pending = 0          # everything reported before this point
+        s._ever_failed = True
+    assert s.print_file(f, "111222333", "CANON")[0]
+    with s._lock:
+        assert s._ever_failed is False
+    release.set()

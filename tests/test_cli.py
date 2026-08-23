@@ -103,3 +103,12 @@ def test_load_target_bad_json(tmp_path: Path):
     p = tmp_path / "target.json"
     p.write_text("{not json", encoding="utf-8")
     assert load_selected_target(FakeDB(ROWS), path=p) is None
+
+
+def test_save_selected_target_atomic_no_temp_leftovers(tmp_path: Path):
+    """B4: target.json is written temp+replace, never truncated in place."""
+    import json
+    p = tmp_path / "target.json"
+    save_selected_target("656 055 745", "IT", path=p)
+    assert json.loads(p.read_text(encoding="utf-8"))["host_id"] == "656055745"
+    assert list(tmp_path.glob("*.tmp")) == []
