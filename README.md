@@ -102,22 +102,34 @@ TCP 9100 (API) and UDP 5353 (mDNS) on the Private profile, and calls the
 agent's `--install-verbs` to add the right-click verb. On domain networks
 the firewall rules are per-PC; adjust via GPO.
 
-Since 0.2.3, agent data (printers, grants, tokens, identity) is shared
-machine-wide in `%PROGRAMDATA%\PrintLink` so every user account on a PC sees
-the same printers. This makes tokens readable by any local user — see
-`docs/security.md` for the threat model and planned hardening.
+Since 0.2.3 the shared printer list and PC identity live machine-wide in
+`%PROGRAMDATA%\PrintLink`. Since 0.3, pairing tokens moved to a per-user
+private db (`%LOCALAPPDATA%\PrintLink\printlink-private.db`) — see
+`docs/security.md` for the threat model.
 
 ## Security model
 
 - Host-controlled access: nothing prints without an accepted grant.
-- Grants: 7-day expiry by default, hourly enforcement, manual revocation or
-  extension ("Manage grants..." on the host).
-- Pairing token (64 hex chars) = auth credential + encryption key.
-- Payloads encrypted AES-256-GCM; tampering fails decryption.
-- `/ping` ID verification prevents stale-IP impersonation after DHCP churn.
-- `POST /revoke-grant` lets a remote revoke its own access (token-verified,
-  so nobody can cut someone else's grant); unsharing a printer revokes all
-  its grants.
+- Grants: 7-day expiry by default (server-clamped to 1–90 days), hourly
+  enforcement, manual revocation or extension ("Manage grants..." on the
+  host).
+- Pairing token (64 hex chars) = AES key + HMAC auth key. Since 0.3 it is
+  **never transmitted**: each request proves possession via
+  `hmac_sha256(sha256(token), one-time-nonce)`, so sniffing a job yields
+  neither the credential nor the payload key. Pre-0.3 peers are tolerated
+  behind `LEGACY_TOKEN_AUTH` until every PC is updated.
+- Identity verification: senders `/ping`-check that the machine at the
+  resolved IP really owns the dialed ID **before every** sensitive call
+  (pairing, printing, revocation) — stale-IP and mDNS spoofing attempts
+  fail closed.
+- Payloads encrypted AES-256-GCM; tampering fails decryption (401).
+- Pairing tokens live in a per-user private db (`%LOCALAPPDATA%`), so one
+  Windows account can no longer read another's tokens or inject grants
+  into its host. The shared printer list stays machine-wide.
+- Pairing endpoint is rate-limited (5/15 min per IP); accept dialogs
+  auto-decline after 60 s.
+- `POST /revoke-grant` lets a remote revoke its own access (HMAC-proven);
+  unsharing a printer revokes all its grants.
 
 See `docs/protocol.md` for wire formats, `docs/architecture.md` for design,
 and `docs/security.md` for the threat model.

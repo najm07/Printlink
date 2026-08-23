@@ -24,7 +24,9 @@ Access via pairwise grants with pairing tokens and automatic expiry (default
 |  sender.py      HTTP client + retry queue     (daemon thread)   |
 |  discovery.py   mDNS advertise/resolve        (zeroconf thread) |
 |  main.py        wiring, hourly expiry sweeper (daemon thread)   |
-|  db.py          SQLite: shared_printers / grants / remote_printers |
+|  auth.py        HMAC challenge/proof wire auth (0.3+)           |
+|  db.py          SHARED sqlite: shared_printers                  |
+|                 PRIVATE sqlite: grants / remote_printers        |
 |  identity.py    persistent 9-digit PC ID                        |
 |  shares.py      grant lifecycle (pure logic)                    |
 |  crypto.py      AES-GCM payload encryption keyed by token       |
@@ -35,10 +37,11 @@ Access via pairwise grants with pairing tokens and automatic expiry (default
 +-----------------------------------------------------------------+
 ```
 
-Since 0.2.3 all agent data lives machine-wide in `%PROGRAMDATA%\PrintLink` so
-every Windows account on a PC sees the same printers, grants, and identity
-(falls back to per-user `%LOCALAPPDATA%` when not writable). See
-`docs/security.md` for the threat model.
+Since 0.3 storage is split by secretiveness: `printlink.db` in
+`%PROGRAMDATA%\PrintLink` is machine-wide and holds only the shared
+printer list + identity; `printlink-private.db` in per-user
+`%LOCALAPPDATA%\PrintLink` holds grants and remote printers (the
+token-bearing tables). See `docs/security.md` for the threat model.
 
 ## Data flows
 
@@ -57,8 +60,11 @@ every Windows account on a PC sees the same printers, grants, and identity
 Any app -> "Print with PrintLink" verb or tray -> "Send document..."
    -> preview dialog: target printer + copies/pages/paper/color/duplex/fit
    -> Sender.print_file(host_id, alias)  [persisted last target as default]
-   -> POST /print (X-Sender-ID, X-Token, AES-GCM payload)
-   -> host authorize_print() (token + expiry + status)
+   -> /ping identity check of the resolved IP (60s route cache)
+   -> GET /auth-challenge  (one-time nonce)
+   -> POST /print (X-Sender-ID, X-Token-Hint, X-Nonce, X-Signature;
+                   AES-GCM payload — the token itself never crosses)
+   -> host verifies HMAC proof, grant status/expiry, printer health
    -> host dispatches by format:
         PDF    -> PyMuPDF page-range subset + SumatraPDF -print-settings
         Word   -> Word COM automation (copies, page range)
@@ -80,15 +86,18 @@ Any app -> "Print with PrintLink" verb or tray -> "Send document..."
   before anything leaves the machine.
 - **Host-side per-format rendering** (PyMuPDF/SumatraPDF, Word COM, GDI+,
   spooler TEXT) — the receiver applies the job's options natively.
-- **Token as encryption key**: pairing token doubles as AES-GCM key — no PKI,
-  no key exchange; revoking the grant kills both auth and confidentiality.
+- **Token as key material, never as wire credential** (0.3): the pairing
+  token derives the AES-GCM payload key and the per-request HMAC proof;
+  a one-time nonce kills replay, and revoking the grant invalidates both.
 - **mDNS + IP cache fallback**: resolver updates `host_ip` on each success;
-  stored IP used when mDNS is blocked (VLANs/switches).
+  stored IP used when mDNS is blocked (VLANs/switches) — always re-verified
+  against `/ping` before use.
 - **User-session tray agent** (not a Windows Service): dialogs and tray icon
   require the interactive session; auto-start via Run key.
-- **Machine-wide shared data dir** (`%PROGRAMDATA%\PrintLink`): one identity
-  and one set of printers per PC, so any user account can print with the
-  right-click verb. Per-user fallback preserves correctness if unwritable.
+- **Split storage**: machine-wide shared dir for printers/identity so any
+  account sees the same printers; per-user private db for tokens so local
+  accounts can't read each other's credentials. Per-user fallback preserves
+  correctness if %PROGRAMDATA% is unwritable.
 - **Shell-verb in HKLM** (with HKCU fallback) so the verb exists for every
   account, registered by the elevated installer.
 

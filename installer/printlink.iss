@@ -11,7 +11,7 @@
 ; Build:  pwsh scripts\build.ps1      (or: iscc printlink.iss)
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.7"
+  #define MyAppVersion "0.3.0"
 #endif
 #define MyAppName      "PrintLink"
 #define MyAppPublisher "PrintLink"
