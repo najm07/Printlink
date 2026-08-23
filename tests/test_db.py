@@ -77,7 +77,8 @@ def test_shared_printer_rename_and_unshare(db):
 
 def test_find_grant_by_remote_and_alias(db):
     pid = db.add_shared_printer("HP", "Accounting-HP")
-    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00")
+    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00",
+                    printer_alias="Accounting-HP")
     g = db.find_grant_by_remote_and_alias("111222333", "Accounting-HP")
     assert g is not None and g["token"] == "tok"
     assert db.find_grant_by_remote_and_alias("111222333", "Ghost") is None
@@ -91,12 +92,32 @@ def test_remote_label_fallback(db):
     assert remote_label(db.get_remote_printer("777888999", "Office-HP")) == "Office-HP @ Reception"
 
 
-def test_migration_adds_name_column(tmp_path):
+def test_migration_splits_combined_database(tmp_path):
+    """Pre-0.3 single-file layout -> shared printers stay machine-wide,
+    token tables move to the per-user private file (grants gain a
+    denormalized printer_alias from the same-file join)."""
     import sqlite3
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as con:
         con.executescript(
-            """CREATE TABLE remote_printers (
+            """CREATE TABLE shared_printers (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   local_name TEXT NOT NULL,
+                   alias TEXT NOT NULL,
+                   enabled INTEGER NOT NULL DEFAULT 1,
+                   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                   UNIQUE(local_name));
+               CREATE TABLE grants (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   remote_id TEXT NOT NULL,
+                   remote_name TEXT,
+                   printer_id INTEGER NOT NULL REFERENCES shared_printers(id) ON DELETE CASCADE,
+                   token TEXT NOT NULL,
+                   granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                   expires_at TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','revoked')),
+                   UNIQUE(remote_id, printer_id));
+               CREATE TABLE remote_printers (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                    host_id TEXT NOT NULL,
                    host_name TEXT,
@@ -107,36 +128,67 @@ def test_migration_adds_name_column(tmp_path):
                    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
                    expires_at TEXT NOT NULL,
                    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','revoked')),
-                   UNIQUE(host_id, printer_alias)
-               );
-               CREATE TABLE shared_printers (
-                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   local_name TEXT NOT NULL,
-                   alias TEXT NOT NULL,
-                   enabled INTEGER NOT NULL DEFAULT 1,
-                   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                   UNIQUE(local_name)
-               );
-               CREATE TABLE grants (
-                   id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   remote_id TEXT NOT NULL,
-                   remote_name TEXT,
-                   printer_id INTEGER NOT NULL REFERENCES shared_printers(id) ON DELETE CASCADE,
-                   token TEXT NOT NULL,
-                   granted_at TEXT NOT NULL DEFAULT (datetime('now')),
-                   expires_at TEXT NOT NULL,
-                   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','expired','revoked')),
-                   UNIQUE(remote_id, printer_id)
-               );""")
-    migrated = Database(path)
-    with migrated.connect() as con:
-        cols = {r["name"] for r in con.execute("PRAGMA table_info(remote_printers)")}
-    assert "name" in cols
+                   UNIQUE(host_id, printer_alias));""")
+        con.execute("INSERT INTO shared_printers (local_name, alias) VALUES ('HP', 'acct')")
+        con.execute("""INSERT INTO grants (remote_id, remote_name, printer_id,
+                       token, expires_at) VALUES ('111222333', 'A', 1, 'tok', '2030-01-01')""")
+        con.execute("""INSERT INTO remote_printers (host_id, printer_alias, token,
+                       expires_at) VALUES ('444555666', 'office-hp', 'tok2', '2030-01-01')""")
+
+    db = Database(path)
+    private = tmp_path / "old-private.db"
+
+    with sqlite3.connect(db.shared_path) as con:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert not ({"grants", "remote_printers"} & tables)
+        assert "shared_printers" in tables
+        assert con.execute("SELECT COUNT(*) FROM shared_printers").fetchone()[0] == 1
+
+    with sqlite3.connect(private) as con:
+        con.row_factory = sqlite3.Row
+        g = con.execute("SELECT * FROM grants WHERE remote_id='111222333'").fetchone()
+        assert g["token"] == "tok" and g["printer_alias"] == "acct"
+        rp = con.execute(
+            "SELECT * FROM remote_printers WHERE host_id='444555666'").fetchone()
+        assert rp["token"] == "tok2"
+        cols = {r[1] for r in con.execute("PRAGMA table_info(remote_printers)")}
+        assert "name" in cols            # fresh private schema includes it
+
+    # and the migrated data keeps working through the normal API
+    assert db.find_grant("111222333", "tok")["printer_alias"] == "acct"
+
+
+def test_split_routing_tables_in_right_files(tmp_path):
+    shared_only = tmp_path / "s.db"
+    db = Database(shared_only, tmp_path / "p.db")
+    db.add_shared_printer("HP", "a")
+    import sqlite3
+    with sqlite3.connect(shared_only) as con:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert not ({"grants", "remote_printers"} & tables)
+    with sqlite3.connect(tmp_path / "p.db") as con:
+        tables = {r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"grants", "remote_printers"} <= tables
+
+
+def test_alias_rename_syncs_denormalized_grants(db):
+    """Grants carry an alias snapshot (cross-file JOIN is impossible since
+    the split); renaming must keep them findable under the new alias."""
+    pid = db.add_shared_printer("HP", "Old-Alias")
+    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00",
+                    printer_alias="Old-Alias")
+    db.update_shared_printer_alias(pid, "New-Alias")
+    assert db.find_grant_by_remote_and_alias("111222333", "New-Alias") is not None
+    assert db.find_grant_by_remote_and_alias("111222333", "Old-Alias") is None
 
 
 def test_cascade_delete_removes_grants(db):
     pid = db.add_shared_printer("HP", "a")
-    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00")
-    with db.connect() as con:
-        con.execute("DELETE FROM shared_printers WHERE id = ?", (pid,))
+    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00",
+                    printer_alias="a")
+    # manual cascade lives in the method (cross-file FKs don't exist)
+    assert db.delete_shared_printer(pid)
     assert db.list_grants() == []

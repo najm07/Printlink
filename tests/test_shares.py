@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 import pytest
 from db import Database
-from shares import (create_grant, authorize_print, revoke_grant,
-                    sweep_expired_grants, store_accepted_share,
-                    get_usable_printer, extend_grant, revoke_remote_share)
+from shares import (create_grant, authorize_print, authorize_print_proof,
+                    revoke_grant, sweep_expired_grants, store_accepted_share,
+                    get_usable_printer, extend_grant, revoke_remote_share,
+                    revoke_remote_share_proof)
+from auth import sign_nonce
 
 EXP = "%Y-%m-%d %H:%M:%S"
 
@@ -45,7 +47,7 @@ def test_expiry_enforced_and_swept(setup):
     db, pid = setup
     g = create_grant(db, "444 555 666", "Sara-PC", pid)
     yesterday = (_utcnow() - timedelta(days=1)).strftime(EXP)
-    with db.connect() as con:
+    with db.connect_private() as con:
         con.execute("UPDATE grants SET expires_at = ? WHERE remote_id = '444555666'", (yesterday,))
     assert sweep_expired_grants(db) == 1
     assert authorize_print(db, "444 555 666", g["token"])["error"] == "share expired"
@@ -55,7 +57,7 @@ def test_expiry_enforced_and_swept(setup):
 def test_unshared_printer_denies(setup):
     db, pid = setup
     g = create_grant(db, "111 222 333", "Ahmed-PC", pid)
-    with db.connect() as con:
+    with db.connect_shared() as con:
         con.execute("UPDATE shared_printers SET enabled = 0 WHERE id = ?", (pid,))
     assert authorize_print(db, "111 222 333", g["token"])["error"] == "printer no longer shared"
 
@@ -96,8 +98,44 @@ def test_extend_grant_reactivates(tmp_path):
 def test_revoke_remote_share(tmp_path):
     db = Database(tmp_path / "t.db")
     pid = db.add_shared_printer("HP", "Accounting-HP")
-    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00")
+    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00",
+                    printer_alias="Accounting-HP")
     assert revoke_remote_share(db, "111222333", "Accounting-HP", "wrong")["error"] == "token mismatch"
     assert revoke_remote_share(db, "111222333", "Ghost", "tok")["error"].startswith("no grant")
     assert revoke_remote_share(db, "111222333", "Accounting-HP", "tok")["ok"]
     assert db.list_grants()[0]["status"] == "revoked"
+
+
+def test_revoke_remote_share_proof(tmp_path):
+    from auth import sign_nonce
+    db = Database(tmp_path / "t.db")
+    pid = db.add_shared_printer("HP", "Accounting-HP")
+    db.upsert_grant("111222333", pid, "tok", "2030-01-01 00:00:00",
+                    printer_alias="Accounting-HP")
+    bad = revoke_remote_share_proof(db, "111222333", "Accounting-HP",
+                                    "nonce", sign_nonce("other", "nonce"))
+    assert bad["error"] == "no matching grant or bad signature"
+    ok = revoke_remote_share_proof(db, "111222333", "Accounting-HP",
+                                   "nonce", sign_nonce("tok", "nonce"))
+    assert ok == {"ok": True}
+    assert db.list_grants()[0]["status"] == "revoked"
+
+
+def test_authorize_print_proof(tmp_path):
+    """0.3 gate: hint routes to the grant, HMAC proof over a fresh nonce
+    authenticates; wrong proof/hint finds nothing."""
+    from auth import token_hint
+    db = Database(tmp_path / "t.db")
+    pid = db.add_shared_printer("HP", "Accounting-HP")
+    g = create_grant(db, "111 222 333", "Ahmed-PC", pid)
+    res = authorize_print_proof(db, "111222333",
+                                token_hint(g["token"]), "n1",
+                                sign_nonce(g["token"], "n1"))
+    assert res["ok"] and res["printer"]["alias"] == "Accounting-HP"
+    bad = authorize_print_proof(db, "111222333",
+                                token_hint(g["token"]), "n2",
+                                sign_nonce("wrong-token", "n2"))
+    assert not bad["ok"]
+    assert not authorize_print_proof(db, "999999999",
+                                     token_hint(g["token"]), "n3",
+                                     sign_nonce(g["token"], "n3"))["ok"]

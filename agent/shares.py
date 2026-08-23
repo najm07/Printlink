@@ -25,12 +25,13 @@ def _fmt(dt: datetime) -> str:
 # ---------- host side ----------
 
 def create_grant(db: Database, remote_id: str, remote_name: str, printer_id: int,
-                 days: int = DEFAULT_SHARE_DAYS) -> dict:
+                 days: int = DEFAULT_SHARE_DAYS,
+                 printer_alias: str | None = None) -> dict:
     """Called when the host user clicks 'Accept' on a share request."""
     token = new_pairing_token()  # 64-char pairing token
     expires = _utcnow() + timedelta(days=days)
     db.upsert_grant(normalize_id(remote_id), printer_id, token, _fmt(expires),
-                    remote_name)
+                    remote_name, printer_alias=printer_alias)
     return {"token": token, "expires_at": _fmt(expires)}
 
 
@@ -78,7 +79,7 @@ def revoke_grant(db: Database, grant_id: int) -> None:
 def extend_grant(db: Database, grant_id: int, days: int = DEFAULT_SHARE_DAYS) -> str:
     """Re-activate a grant and push its expiry out by `days`. Returns new expiry."""
     expires = _utcnow() + timedelta(days=days)
-    with db.connect() as con:
+    with db.connect_private() as con:
         con.execute("UPDATE grants SET expires_at = ?, status = 'active' WHERE id = ?",
                     (_fmt(expires), grant_id))
     return _fmt(expires)

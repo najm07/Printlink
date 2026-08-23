@@ -8,30 +8,39 @@ APP_NAME = "PrintLink"
 # Keep in sync with MyAppVersion in installer/printlink.iss
 VERSION = "0.2.7"
 
-# --- storage ---
-# Data lives machine-wide under %PROGRAMDATA% so EVERY user account on the PC
-# shares one identity, one grant/printers DB, and one persisted target —
-# otherwise printers added by the admin never show up for other accounts.
-# Falls back to per-user %LOCALAPPDATA% when the shared dir is not writable.
+# --- storage (split since 0.3, see docs/security.md) ---
+# SHARED: %PROGRAMDATA%\PrintLink — machine-wide, nothing secret. Holds the
+#   shared-printer list, this PC's identity, and logs; every Windows account
+#   must see the same printers.
+# PRIVATE: per-user %LOCALAPPDATA%\PrintLink — holds printlink-private.db
+#   (grants + remote printers) and target.json. Tokens become readable only
+#   by the account that owns them.
+# Falls back to per-user for BOTH when %PROGRAMDATA% is not writable.
 _PER_USER_DIR = Path.home() / "AppData" / "Local" / "PrintLink"
 SHARED_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "PrintLink"
+PRIVATE_DIR = _PER_USER_DIR
 
 
-def _pick_data_dir() -> Path:
+def _dir_writable(d: Path) -> bool:
     try:
-        SHARED_DIR.mkdir(parents=True, exist_ok=True)
-        probe = SHARED_DIR / ".writetest"
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".writetest"
         probe.write_text("x")
         probe.unlink()
-        return SHARED_DIR
+        return True
     except OSError:
-        return _PER_USER_DIR
+        return False
 
 
-DATA_DIR = _pick_data_dir()
-DB_FILE = DATA_DIR / "printlink.db"
+def _pick_shared_dir() -> Path:
+    return SHARED_DIR if _dir_writable(SHARED_DIR) else _PER_USER_DIR
+
+
+DATA_DIR = _pick_shared_dir()          # legacy name: where machine-wide data lives
+DB_FILE = DATA_DIR / "printlink.db"                # shared db (printers only)
+PRIVATE_DB_FILE = PRIVATE_DIR / "printlink-private.db"  # tokens (per-user)
 IDENTITY_FILE = DATA_DIR / "identity.json"
-TARGET_FILE = DATA_DIR / "target.json"   # last tray-selected remote printer
+TARGET_FILE = PRIVATE_DIR / "target.json"          # last tray-selected remote
 
 # --- network ---
 LISTEN_PORT = 9100                 # HTTP API port (TCP, firewall-opened)
@@ -68,17 +77,31 @@ INBOX_DIR_NAME = "printlink_jobs"      # host side (received uploads)
 def migrate_from_per_user():
     """First run on the shared dir: pull identity/db/target from the current
     user's old per-user data dir so nothing is lost. Never overwrites files
-    that already exist in the shared dir."""
+    that already exist in the destination."""
     if DATA_DIR == _PER_USER_DIR or not _PER_USER_DIR.exists():
         return
-    for name in ("printlink.db", "identity.json", "target.json"):
-        src = _PER_USER_DIR / name
-        dst = DATA_DIR / name
-        if src.exists() and not dst.exists():
-            try:
-                shutil.copy2(src, dst)
-            except OSError:
-                pass
+    for src_dir, dst_dir, names in (
+            (_PER_USER_DIR, DATA_DIR, ("printlink.db", "identity.json")),
+            (_PER_USER_DIR, PRIVATE_DIR, ("target.json",))):
+        for name in names:
+            src = src_dir / name
+            dst = dst_dir / name
+            if src.exists() and not dst.exists():
+                try:
+                    shutil.copy2(src, dst)
+                except OSError:
+                    pass
+
+
+def migrate_legacy_target():
+    """0.2.3-0.2.7 kept target.json machine-wide next to the db; since 0.3
+    it is a per-user preference — carry it over once."""
+    legacy = SHARED_DIR / "target.json"
+    if legacy.exists() and not TARGET_FILE.exists():
+        try:
+            shutil.copy2(legacy, TARGET_FILE)
+        except OSError:
+            pass
 
 
 def _try_fix_acl() -> None:
@@ -99,6 +122,8 @@ def _try_fix_acl() -> None:
 
 def ensure_dirs():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PRIVATE_DIR.mkdir(parents=True, exist_ok=True)
     migrate_from_per_user()
+    migrate_legacy_target()
     _try_fix_acl()
 

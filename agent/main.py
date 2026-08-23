@@ -26,7 +26,8 @@ from cli import (install_shell_verbs, uninstall_shell_verbs,
                  save_selected_target, load_selected_target,
                  pick_target_dialog)
 from preview import ask_print_options
-from config import (DATA_DIR, LISTEN_PORT, SWEEP_INTERVAL_S, ensure_dirs)
+from config import (DATA_DIR, DB_FILE, PRIVATE_DB_FILE, LISTEN_PORT,
+                    SWEEP_INTERVAL_S, ensure_dirs)
 from logutil import setup_logging, get_logger
 
 log = get_logger("main")
@@ -39,7 +40,7 @@ def _expiry_sweeper(db: Database, stop: threading.Event):
         try:
             n = sweep_expired_grants(db)
             now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-            with db.connect() as con:
+            with db.connect_private() as con:
                 con.execute(
                     "UPDATE remote_printers SET status='expired' "
                     "WHERE status='active' AND expires_at < ?", (now,))
@@ -59,7 +60,7 @@ def _cmd_send(args) -> int:
     setup_logging()
     ensure_dirs()
     my_id = load_or_create_id(DATA_DIR)
-    db = Database(DATA_DIR / "printlink.db")
+    db = Database(DB_FILE, PRIVATE_DB_FILE)
     ok, err = check_send_file(args.send)
     if not ok:
         log.error("send: %s", err)
@@ -156,7 +157,7 @@ def _cmd_tray() -> None:
     # 1. identity + storage
     my_id = load_or_create_id(DATA_DIR)
     my_name = f"{socket.gethostname()}"
-    db = Database(DATA_DIR / "printlink.db")
+    db = Database(DB_FILE, PRIVATE_DB_FILE)
     log.info("PrintLink agent starting — PC ID: %s (%s), log in %s",
              my_id, my_name, DATA_DIR / "printlink.log")
 

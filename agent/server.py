@@ -191,7 +191,8 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
             log.info("request-share: local user DECLINED %s", sender_id)
             return jsonify({"status": "refused", "reason": "user declined"}), 403
 
-        grant = create_grant(db, sender_id, sender_name, shared["id"], days=days)
+        grant = create_grant(db, sender_id, sender_name, shared["id"], days=days,
+                             printer_alias=shared["alias"])
         log.info("request-share ACCEPTED: grant for %s on '%s' expires %s",
                  sender_id, alias, grant["expires_at"])
         return jsonify({"status": "accepted", "token": grant["token"],

@@ -86,7 +86,7 @@ Filename: "netsh"; Parameters: "advfirewall firewall delete rule name=""PrintLin
 ; Remove the agent binary; keep user data (identity + DB) so re-installs
 ; keep the same PC ID — delete manually from %PROGRAMDATA%\PrintLink if desired
 Type: files; Name: "{app}\{#MyAppExeName}"
-; Drop the persisted send-target preference (re-pick in the tray after reinstall);
-; since 0.2.3 it lives machine-wide, next to the DB
-Type: files; Name: "{commonappdata}\PrintLink\target.json"
+; Drop the persisted send-target preference; it is a per-user setting again
+; since 0.3 (lives next to the private token db)
+Type: files; Name: "{localappdata}\PrintLink\target.json"
 
