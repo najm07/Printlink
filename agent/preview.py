@@ -117,6 +117,10 @@ def _setup_style(root) -> dict:
                     font=fonts["title"])
     style.configure("Hint.TLabel", background=BG_APP, foreground=TEXT_HINT,
                     font=fonts["hint"])
+    style.configure("DocTitle.TLabel", background=BG_APP,
+                    foreground=TEXT_PRIMARY, font=(family, 12, "bold"))
+    style.configure("Summary.TLabel", background=BG_CARD,
+                    foreground=ACCENT, font=(family, 9, "bold"))
 
     style.configure("TLabelframe", background=BG_APP, bordercolor=BORDER,
                     relief="solid", borderwidth=1)
@@ -303,26 +307,15 @@ class PreviewDialog:
         header.grid(row=0, column=0, columnspan=2, sticky="ew",
                     pady=(0, 16))
 
-        ttk.Label(header, text="Printer:", style="Title.TLabel").grid(
-            row=0, column=0, sticky="w")
+        # document identity line: name + what/how-big/how-many
+        ttk.Label(header, text=os.path.basename(filepath),
+                  style="DocTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text=_meta_line(filepath, fmt, page_count),
+                  style="Hint.TLabel").grid(row=1, column=0, sticky="w",
+                                            pady=(2, 0))
+
         self.printer_var = tk.StringVar(self.top)
         self._printer_map: dict[str, tuple[str, str]] = {}
-        if self._printers:
-            default = self._printers[0]
-            if self._selected:
-                default = next((p for p in self._printers
-                                if p[0] == self._selected[0]
-                                and p[1] == self._selected[1]), default)
-            entries = []
-            for p in self._printers:
-                label = self._printer_label(p)
-                entries.append(label)
-                self._printer_map[label] = (p[0], p[1])
-            self.printer_var.set(self._printer_label(default))
-            ttk.Combobox(header, textvariable=self.printer_var,
-                         values=entries, state="readonly",
-                         width=30).grid(row=0, column=1, sticky="w",
-                                        padx=(10, 0))
 
         # --- thumbnail, presented as a small elevated card ---------------
         thumb_wrap = tk.Frame(body, background=SHADOW)
@@ -336,13 +329,36 @@ class PreviewDialog:
         tk.Label(card, image=self._photo, background=BG_CARD,
                 borderwidth=0).pack(padx=1, pady=1)
 
-        # --- right column: two grouped sections ---------------------------
+        # --- right column: destination, job, settings, summary ------------
         right_col = ttk.Frame(body)
         right_col.grid(row=1, column=1, sticky="n")
 
+        dest_frame = ttk.Labelframe(right_col, text="Destination",
+                                    padding=(14, 8, 14, 10))
+        dest_frame.grid(row=0, column=0, sticky="ew")
+        if self._printers:
+            default = self._printers[0]
+            if self._selected:
+                default = next((p for p in self._printers
+                                if p[0] == self._selected[0]
+                                and p[1] == self._selected[1]), default)
+            entries = []
+            for p in self._printers:
+                label = self._printer_label(p)
+                entries.append(label)
+                self._printer_map[label] = (p[0], p[1])
+            self.printer_var.set(self._printer_label(default))
+            cb = ttk.Combobox(dest_frame, textvariable=self.printer_var,
+                              values=entries, state="readonly", width=32)
+            cb.grid(row=0, column=0, sticky="ew")
+        else:
+            ttk.Label(dest_frame,
+                      text=(self._selected or ("", "?"))[1],
+                      style="TLabel").grid(row=0, column=0, sticky="w")
+
         job_frame = ttk.Labelframe(right_col, text="Copies & Pages",
-                                   padding=(14, 10, 14, 12))
-        job_frame.grid(row=0, column=0, sticky="ew")
+                                   padding=(14, 8, 14, 12))
+        job_frame.grid(row=1, column=0, sticky="ew", pady=(12, 0))
 
         self.copies = tk.IntVar(self.top, value=1)
         ttk.Label(job_frame, text="Copies:").grid(
@@ -364,9 +380,9 @@ class PreviewDialog:
         if fmt not in COUNTABLE and fmt not in MULTI_PAGE_UNKNOWN:
             self.pages_entry.state(["disabled"])
 
-        settings_frame = ttk.Labelframe(right_col, text="Print Settings",
-                                        padding=(14, 10, 14, 12))
-        settings_frame.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        settings_frame = ttk.Labelframe(right_col, text="Settings",
+                                        padding=(14, 8, 14, 12))
+        settings_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
 
         self.paper = tk.StringVar(self.top, value="auto")
         self.color = tk.StringVar(self.top, value="color")
@@ -378,16 +394,34 @@ class PreviewDialog:
             ("Paper:", self.paper, PAPERS),
             ("Color:", self.color, COLORS),
             ("Duplex:", self.duplex, DUPLEX),
-            ("Orientation:", self.orientation, ORIENTATIONS),
+            ("Orient:", self.orientation, ORIENTATIONS),
             ("Fit:", self.fit, FITS),
         ]
         for i, (label_text, var, values) in enumerate(settings_rows):
-            pady = (0, 8) if i < len(settings_rows) - 1 else (0, 0)
+            r, c = divmod(i, 2)
+            last_row = r == (len(settings_rows) - 1) // 2
             ttk.Label(settings_frame, text=label_text).grid(
-                row=i, column=0, sticky="e", padx=(0, 10), pady=pady)
+                row=r, column=c * 2, sticky="e",
+                padx=((0, 6), (18, 6))[c], pady=(0, 0 if last_row else 8))
             ttk.Combobox(settings_frame, textvariable=var, values=values,
-                        state="readonly", width=12).grid(
-                row=i, column=1, sticky="w", pady=pady)
+                         state="readonly", width=10).grid(
+                row=r, column=c * 2 + 1, sticky="w", pady=(0, 0 if last_row
+                                                           else 8))
+
+        # live one-line summary of exactly what is about to be sent
+        self.summary_var = tk.StringVar(self.top)
+        summary_card = tk.Frame(right_col, background=BG_CARD,
+                                highlightbackground=BORDER,
+                                highlightthickness=1)
+        summary_card.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        ttk.Label(summary_card, textvariable=self.summary_var,
+                  style="Summary.TLabel", padding=(10, 6)).grid(
+            row=0, column=0, sticky="ew")
+        for var in (self.paper, self.color, self.duplex,
+                    self.orientation, self.fit, self.pages):
+            var.trace_add("write", lambda *_: self._update_summary())
+        self.copies.trace_add("write", lambda *_: self._update_summary())
+        self._update_summary()
 
         ttk.Separator(body, orient="horizontal").grid(
             row=2, column=0, columnspan=2, sticky="ew", pady=(20, 14))
@@ -402,6 +436,27 @@ class PreviewDialog:
 
         self._center()
         self.print_btn.focus_set()
+        self.top.bind("<Return>", lambda e: self._ok())   # Enter = Print
+
+    def _update_summary(self):
+        try:
+            copies = max(1, int(self.copies.get()))
+        except (tk.TclError, ValueError):
+            copies = 1
+        parts = [f"{copies} cop{'y' if copies == 1 else 'ies'}"]
+        if self.paper.get() not in ("auto", ""):
+            parts.append(self.paper.get())
+        parts.append("mono" if self.color.get() == "mono" else "color")
+        if self.duplex.get() not in ("off", ""):
+            parts.append(f"duplex {self.duplex.get()}")
+        if self.orientation.get() not in ("auto", ""):
+            parts.append(self.orientation.get())
+        if self.fit.get():
+            parts.append(f"fit={self.fit.get()}")
+        pages = self.pages.get().strip()
+        if pages:
+            parts.append(f"pages {pages}")
+        self.summary_var.set("  ·  ".join(parts))
 
     def _center(self):
         self.top.update_idletasks()
@@ -465,6 +520,26 @@ class PreviewDialog:
     def _cancel(self):
         self.result = None
         self.top.destroy()
+
+
+def _human_size(n: int) -> str:
+    if n >= 1 << 20:
+        return f"{n / (1 << 20):.1f} MB"
+    if n >= 1 << 10:
+        return f"{n / (1 << 10):.0f} KB"
+    return f"{n} B"
+
+
+def _meta_line(filepath: str, fmt: str, page_count: int | None) -> str:
+    """'PDF · 2.4 MB · 8 pages' — one glanceable line under the filename."""
+    parts = [fmt.upper() if fmt != "binary" else "file"]
+    try:
+        parts.append(_human_size(os.path.getsize(filepath)))
+    except OSError:
+        pass
+    if page_count is not None:
+        parts.append(f"{page_count} page{'s' if page_count != 1 else ''}")
+    return "  ·  ".join(parts)
 
 
 def _sniff_head(filepath: str) -> str:
