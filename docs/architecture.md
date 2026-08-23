@@ -25,6 +25,7 @@ Access via pairwise grants with pairing tokens and automatic expiry (default
 |  discovery.py   mDNS advertise/resolve        (zeroconf thread) |
 |  main.py        wiring, hourly expiry sweeper (daemon thread)   |
 |  auth.py        HMAC challenge/proof wire auth (0.3+)           |
+|  updater.py     GitHub-release update checker (consent-gated)   |
 |  db.py          SHARED sqlite: shared_printers                  |
 |                 PRIVATE sqlite: grants / remote_printers        |
 |  identity.py    persistent 9-digit PC ID                        |

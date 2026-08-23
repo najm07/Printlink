@@ -130,6 +130,11 @@ private db (`%LOCALAPPDATA%\PrintLink\printlink-private.db`) — see
   auto-decline after 60 s.
 - `POST /revoke-grant` lets a remote revoke its own access (HMAC-proven);
   unsharing a printer revokes all its grants.
+- Expiry is enforced by the host on every job; client-side staleness is
+  advisory only, so extending a grant on the host re-enables the sender
+  without any re-pairing.
+- In-app updates: the agent checks GitHub releases daily (tray menu to
+  check manually) and installs with your explicit consent.
 
 See `docs/protocol.md` for wire formats, `docs/architecture.md` for design,
 and `docs/security.md` for the threat model.
