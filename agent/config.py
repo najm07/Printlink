@@ -42,8 +42,13 @@ MAX_JOB_MB = 100
 
 # --- shares ---
 DEFAULT_SHARE_DAYS = 7
-MAX_SHARE_DAYS = 90
+MAX_SHARE_DAYS = 90                # server-side clamp on /request-share 'days'
 SWEEP_INTERVAL_S = 3600            # hourly expiry enforcement
+
+# --- share-request flood control (unauthenticated endpoint) ---
+RATE_SHARE_WINDOW_S = 900          # sliding window per client IP
+RATE_SHARE_MAX = 5                 # max /request-share calls per window
+SHARE_DIALOG_TIMEOUT_S = 60        # unanswered accept dialog auto-declines
 
 # --- sender retry ---
 RETRY_INTERVAL_S = 15

@@ -12,6 +12,8 @@ import json
 import os
 import tempfile
 import threading
+import time
+from collections import deque
 from pathlib import Path
 from flask import Flask, request, jsonify
 from cryptography.exceptions import InvalidTag
@@ -24,8 +26,9 @@ from printer_local import (printer_status, print_via_shell,
                            DEFAULT_OPTIONS)
 from identity import normalize_id
 from crypto import decrypt_payload
-from config import LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME, VERSION
-from logutil import get_logger
+from config import (LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME, VERSION,
+                    MAX_SHARE_DAYS, RATE_SHARE_WINDOW_S, RATE_SHARE_MAX)
+from logutil import get_logger, clean
 
 log = get_logger("server")
 
@@ -54,6 +57,26 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     log.info("HTTP server created on port %d (id=%s, max job %d MB)",
              LISTEN_PORT, my_id, MAX_JOB_MB)
 
+    # Sliding-window rate limit for /request-share: the endpoint is
+    # unauthenticated and each accepted call pops a modal dialog on the
+    # host user's screen, so a looped requester is a spam/DoS vector.
+    share_hits: dict[str, deque] = {}
+
+    def _rate_limited(ip: str) -> bool:
+        now = time.monotonic()
+        hits = share_hits.setdefault(ip, deque())
+        while hits and now - hits[0] > RATE_SHARE_WINDOW_S:
+            hits.popleft()
+        if len(hits) >= RATE_SHARE_MAX:
+            return True
+        hits.append(now)
+        if len(share_hits) > 256:  # bounded memory against IP rotation
+            stale = [k for k, v in share_hits.items()
+                     if not v or now - v[-1] > RATE_SHARE_WINDOW_S]
+            for k in stale:
+                share_hits.pop(k, None)
+        return False
+
     @app.get("/ping")
     def ping():
         log.info("GET /ping from %s", request.remote_addr)
@@ -70,21 +93,38 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
 
     @app.post("/request-share")
     def request_share():
+        if _rate_limited(request.remote_addr or "?"):
+            log.warning("POST /request-share from %s: rate-limited",
+                        request.remote_addr)
+            return jsonify({"status": "refused",
+                            "reason": "too many requests"}), 429
         data = request.get_json(force=True)
         sender_id = normalize_id(data.get("sender_id", ""))
-        sender_name = data.get("sender_name", "unknown")
-        alias = data.get("printer_alias", "")
-        days = int(data.get("days", DEFAULT_SHARE_DAYS))
+        sender_name = clean(data.get("sender_name") or "unknown")
+        alias = clean(data.get("printer_alias"))
+        try:
+            days = int(data.get("days", DEFAULT_SHARE_DAYS))
+        except (TypeError, ValueError):
+            log.warning("request-share: bad 'days' value %r from %s",
+                        data.get("days"), request.remote_addr)
+            return jsonify({"status": "refused", "reason": "invalid days"}), 400
+        # Server-side clamp: the client dialog caps at 90, but the wire is
+        # unauthenticated — a crafted 999999-day request must not stick.
+        days = max(1, min(days, MAX_SHARE_DAYS))
         log.info("POST /request-share from %s: %s (%s) wants '%s' for %d days",
                  request.remote_addr, sender_name, sender_id, alias, days)
 
-        shared = next((p for p in db.list_shared_printers() if p["alias"] == alias), None)
+        shared = next((p for p in db.list_shared_printers()
+                       if p["alias"] == data.get("printer_alias")), None)
         if shared is None:
-            log.warning("request-share refused: '%s' is not a shared printer", alias)
+            log.warning("request-share refused: '%s' is not a shared printer",
+                        alias)
             return jsonify({"status": "refused", "reason": "printer not shared"}), 404
 
         # Ask the local user via the tray callback
-        accepted = on_share_request(sender_id, sender_name, alias, days) if on_share_request else False
+        accepted = on_share_request(sender_id, sender_name,
+                                    data.get("printer_alias", ""), days) \
+            if on_share_request else False
         if not accepted:
             log.info("request-share: local user DECLINED %s", sender_id)
             return jsonify({"status": "refused", "reason": "user declined"}), 403
@@ -99,7 +139,7 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     def revoke_grant():
         data = request.get_json(force=True)
         sender_id = normalize_id(data.get("sender_id", ""))
-        alias = data.get("printer_alias", "")
+        alias = clean(data.get("printer_alias"))
         token = data.get("token", "")
         log.info("POST /revoke-grant from %s for '%s'", request.remote_addr, alias)
         res = revoke_remote_share(db, sender_id, alias, token)
@@ -128,14 +168,14 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
             return jsonify({"error": "no file"}), 400
         raw = upload.read()
         log.info("print: upload.filename=%r bytes=%d (encrypted)",
-                 upload.filename, len(raw))
+                 clean(upload.filename or "", 80), len(raw))
 
         try:
             payload = decrypt_payload(raw, auth["grant"]["token"])
             log.info("print: decrypted %d bytes", len(payload))
         except InvalidTag:
             log.error("print: decrypt FAILED (bad token / tampered payload)")
-            return jsonify({"error": "decrypt failed"}), 500
+            return jsonify({"error": "decrypt failed"}), 401
         except ValueError:
             log.error("print: decrypt FAILED (invalid payload format)")
             return jsonify({"error": "invalid payload"}), 400
@@ -202,7 +242,8 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
             return jsonify({"status": "accepted", "printer": auth["printer"]["alias"]})
         except Exception as e:
             log.error("print: FAILED on '%s': %r", auth["printer"]["local_name"], e)
-            return jsonify({"error": str(e)}), 500
+            # Generic body: exception text can carry local paths/hostnames.
+            return jsonify({"error": "print failed"}), 500
         finally:
             try:
                 os.unlink(path)

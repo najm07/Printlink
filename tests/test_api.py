@@ -2,6 +2,7 @@
 import io
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 import pytest
 
 # stub Windows-only printing before server imports it
@@ -29,6 +30,8 @@ fake.extract_emf = lambda d: None
 sys.modules["printer_local"] = fake
 
 from db import Database
+from config import MAX_SHARE_DAYS, RATE_SHARE_MAX
+import server as server_mod
 from server import create_app
 from crypto import encrypt_payload
 
@@ -179,3 +182,90 @@ def test_print_text_copies(env):
                  options={"copies": 3})
     assert r.status_code == 200
     assert PRINTED[-1] == (b"hello text\n", "HP LaserJet Pro")
+
+
+# ---------- S3: 'days' is validated and clamped server-side ----------------
+
+EXP_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _grant_expiry(db, remote_id):
+    g = next(g for g in db.list_grants() if g["remote_id"] == remote_id)
+    return datetime.strptime(g["expires_at"], EXP_FMT).replace(tzinfo=timezone.utc)
+
+
+def test_share_days_clamped_to_max(env):
+    """A crafted 10^9-day request must not stick (audit S3)."""
+    client, db = env
+    r = client.post("/request-share", json={
+        "sender_id": "222 333 444", "sender_name": "Greedy",
+        "printer_alias": "Accounting-HP", "days": 10 ** 9})
+    assert r.status_code == 200
+    span = _grant_expiry(db, "222333444") - datetime.now(timezone.utc)
+    assert timedelta(days=MAX_SHARE_DAYS - 1) < span \
+        <= timedelta(days=MAX_SHARE_DAYS, seconds=10)
+
+
+def test_share_days_clamped_to_min(env):
+    client, db = env
+    r = client.post("/request-share", json={
+        "sender_id": "333 444 555", "sender_name": "Negative",
+        "printer_alias": "Accounting-HP", "days": -5})
+    assert r.status_code == 200
+    span = _grant_expiry(db, "333444555") - datetime.now(timezone.utc)
+    assert timedelta(0) < span <= timedelta(days=1, seconds=10)
+
+
+def test_share_days_non_numeric_400(env):
+    client, db = env
+    r = client.post("/request-share", json={
+        "sender_id": "444 555 666", "sender_name": "Junk",
+        "printer_alias": "Accounting-HP", "days": "soon"})
+    assert r.status_code == 400
+    assert not [g for g in db.list_grants() if g["remote_id"] == "444555666"]
+
+
+# ---------- S4: the unauthenticated /request-share endpoint is limited -----
+
+def test_share_request_rate_limited(env):
+    client, _db = env
+    codes = []
+    for i in range(RATE_SHARE_MAX + 2):
+        codes.append(client.post(
+            "/request-share",
+            json={"sender_id": f"{100 + i:09d}", "sender_name": "Spam",
+                  "printer_alias": "Accounting-HP"}).status_code)
+    assert codes[:RATE_SHARE_MAX] == [200] * RATE_SHARE_MAX
+    assert codes[RATE_SHARE_MAX:] == [429] * 2
+
+
+# ---------- low-severity fixes: 401 on bad ciphertext, generic 500 ---------
+
+def test_print_tampered_ciphertext_401(env):
+    client, _db = env
+    token = request_share(client).get_json()["token"]
+    blob = b"\x00" * 48          # right length, wrong everything else
+    r = client.post("/print",
+                    headers={"X-Sender-ID": "111 222 333", "X-Token": token},
+                    data={"file": (io.BytesIO(blob), "x.pdf")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 401
+    assert r.get_json()["error"] == "decrypt failed"
+
+
+def test_print_failure_returns_generic_body(env, monkeypatch):
+    """500 must not echo exception text (can contain local paths/hostnames)."""
+    client, _db = env
+    token = request_share(client).get_json()["token"]
+
+    def boom(path, printer, opts=None):
+        raise RuntimeError("C:\\Users\\admin\\secrets\\crashed")
+
+    monkeypatch.setattr(server_mod, "print_pdf", boom)
+    body = encrypt_payload(b"%PDF-1.4 x", token)
+    r = client.post("/print",
+                    headers={"X-Sender-ID": "111 222 333", "X-Token": token},
+                    data={"file": (io.BytesIO(body), "doc.pdf")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 500
+    assert r.get_json() == {"error": "print failed"}

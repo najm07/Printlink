@@ -49,3 +49,16 @@ def setup_logging(level: int = logging.DEBUG) -> logging.Logger:
 def get_logger(name: str) -> logging.Logger:
     """Child logger for a module, e.g. get_logger('sender') -> printlink.sender."""
     return logging.getLogger("printlink." + name)
+
+
+def clean(value, limit: int = 120) -> str:
+    """One-line, bounded rendering of client-supplied strings for log lines.
+
+    Peers control names/filenames over the LAN; raw %s would let them forge
+    or flood log entries with newlines and megabyte-long fields."""
+    if value is None:
+        return ""
+    text = str(value).replace("\r", "\\r").replace("\n", "\\n")
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text

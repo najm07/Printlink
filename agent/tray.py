@@ -14,8 +14,8 @@ from PIL import Image, ImageDraw
 from db import Database, remote_label
 from printer_local import list_printers
 from shares import DEFAULT_SHARE_DAYS
+from config import VERSION, SHARE_DIALOG_TIMEOUT_S
 from logutil import get_logger
-from config import VERSION
 
 log = get_logger("tray")
 
@@ -29,17 +29,36 @@ def _default_icon() -> Image.Image:
     return img
 
 
-def _dialog(fn):
-    """Run a Tkinter dialog in its own thread; return its result via Event."""
+def _dialog(fn, timeout_s: float | None = None):
+    """Run a Tkinter dialog in its own thread; return its result via Event.
+
+    With timeout_s, the window is force-closed after that long and the
+    result is None — an unanswered dialog must never pin the calling
+    thread (the Flask worker) forever."""
     result, done = {}, threading.Event()
+
     def wrapper():
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
+
+        def force_close():
+            try:
+                root.destroy()   # unblocks any modal messagebox inside fn
+            except tk.TclError:
+                pass             # already closed by the user
+
+        if timeout_s:
+            root.after(int(timeout_s * 1000), force_close)
         try:
             result["value"] = fn(root)
+        except tk.TclError:
+            pass                 # force-closed mid-dialog -> treat as None
         finally:
-            root.destroy()
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
             done.set()
     threading.Thread(target=wrapper, daemon=True).start()
     done.wait()
@@ -80,14 +99,18 @@ class PrintLinkTray:
     # ---- share-request gate, called by server.py from the Flask thread ----
     def on_share_request(self, sender_id: str, sender_name: str,
                          printer_alias: str, days: int) -> bool:
-        accepted = _dialog(lambda root: messagebox.askyesno(
-            "PrintLink — print share request",
-            f"{sender_name} (ID {sender_id}) wants to print on\n"
-            f"'{printer_alias}' for {days} day(s).\n\nAccept?"))
+        accepted = _dialog(
+            lambda root: messagebox.askyesno(
+                "PrintLink — print share request",
+                f"{sender_name} (ID {sender_id}) wants to print on\n"
+                f"'{printer_alias}' for {days} day(s).\n\nAccept?",
+            ),
+            timeout_s=SHARE_DIALOG_TIMEOUT_S)
         log.info("share request from %s (%s) for '%s': %s",
                  sender_name, sender_id, printer_alias,
-                 "ACCEPTED" if accepted else "DECLINED")
-        return accepted
+                 "ACCEPTED" if accepted else
+                 ("TIMED OUT" if accepted is None else "DECLINED"))
+        return bool(accepted)
 
     # ---- menu actions ----
     def _target_label(self) -> str:

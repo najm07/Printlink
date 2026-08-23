@@ -35,7 +35,10 @@ Request:
 { "sender_id": "111 222 333", "sender_name": "Ahmed-PC",
   "printer_alias": "Accounting-HP", "days": 7 }
 ```
-The host shows an accept/refuse dialog to the local user.
+The host shows an accept/refuse dialog to the local user (auto-declines
+after 60 s). Requests are rate-limited per client IP (5 per 15 min).
+`days` is clamped server-side into `[1, MAX_SHARE_DAYS=90]` regardless of
+what the client sends.
 
 Responses:
 - `200` accepted:
@@ -43,8 +46,10 @@ Responses:
 { "status": "accepted", "token": "<64 hex chars>",
   "expires_at": "2026-08-09 13:44:00" }
 ```
+- `400` malformed field: `{ "status": "refused", "reason": "invalid days" }`
 - `403` refused: `{ "status": "refused", "reason": "user declined" }`
 - `404` printer not shared: `{ "status": "refused", "reason": "printer not shared" }`
+- `429` rate-limited: `{ "status": "refused", "reason": "too many requests" }`
 
 The token is stored on both sides. Re-requesting renews the grant and rotates
 the token (upsert on `(remote_id, printer_id)`).
@@ -63,10 +68,11 @@ Body (two layers, inner first):
 Max body: 100 MB.
 
 Responses:
-- `200`: `{ "status": "printed", "printer": "Accounting-HP" }`
-- `400`: `{ "error": "no file" }`
+- `200`: `{ "status": "accepted", "printer": "Accounting-HP" }`
+- `400`: `{ "error": "no file" | "invalid payload" | "invalid options" }`
+- `401`: `{ "error": "decrypt failed" }` (wrong token / tampered payload)
 - `403`: `{ "error": "unknown ID or token" | "share was revoked" | "share expired" }`
-- `500`: `{ "error": "<local print failure>" }`
+- `500`: `{ "error": "print failed" }` (details only in the host's log)
 - `503`: `{ "error": "printer is offline" }`
 
 The host checks, in order: token known -> not revoked -> not expired (marks
@@ -94,8 +100,10 @@ in 0.3.0. See git history or `docs/debugging-notes.md` for how it worked.
 | mDNS | host not found | sender: "Host not found on the LAN" |
 | /ping | ID mismatch | sender: "ID mismatch: ..." |
 | request-share | declined | 403 + reason |
+| request-share | flood | 429 "too many requests" |
 | print | bad token | 403 "unknown ID or token" |
 | print | expired | 403 "share expired" (state flips to expired) |
 | print | revoked | 403 "share was revoked" |
 | print | printer offline | 503 |
-| print | decrypt fail | 500 (InvalidTag) — treated as tamper |
+| print | decrypt fail | 401 (InvalidTag) — treated as tamper |
+| print | local spool error | 500 "print failed" (detail in host log) |
