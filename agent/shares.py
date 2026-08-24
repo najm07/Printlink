@@ -109,11 +109,12 @@ def sweep_expired_grants(db: Database) -> int:
 
 def store_accepted_share(db: Database, host_id: str, host_name: str, host_ip: str,
                          printer_alias: str, token: str, expires_at: str,
-                         name: str | None = None) -> None:
+                         name: str | None = None,
+                         tls_fp: str | None = None) -> None:
     """Called when the host accepts our request and replies with a token."""
     db.upsert_remote_printer(normalize_id(host_id), printer_alias, token,
                              expires_at, host_ip=host_ip, host_name=host_name,
-                             name=name)
+                             name=name, tls_fp=tls_fp)
 
 
 def get_usable_printer(db: Database, host_id: str, printer_alias: str) -> dict:

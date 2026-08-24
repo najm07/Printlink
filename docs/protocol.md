@@ -1,7 +1,16 @@
 # PrintLink Protocol Specification
 
-Wire contracts between PrintLink agents.
+Wire contracts between PrintLink agents (v1.0).
 All multi-byte integers little-endian. All timestamps UTC `YYYY-MM-DD HH:MM:SS`.
+
+## 0. Transport (1.0)
+
+The API is **HTTPS-only** on TCP 9100. The host presents one persistent
+self-signed certificate (CN = its PC ID, generated on first run); there is
+no CA — senders pin the certificate fingerprint they captured at pairing
+time and refuse any other certificate. `GET /ping` reports `"tls": true`,
+and the pairing response carries the host's `tls_fp` so senders can store
+it at the moment both humans confirm.
 
 ## 1. mDNS advertisement
 

@@ -47,7 +47,7 @@ Jobs travel encrypted (AES-GCM keyed by the pairing token) directly PC-to-PC.
 ```
 agent/         Python tray agent (all PCs)
 installer/     Inno Setup script (agent-only install)
-docs/          architecture.md, protocol.md, security.md, debugging-notes.md
+docs/          architecture.md, protocol.md, security.md, troubleshooting.md
 tests/         pytest suite
 ```
 
@@ -133,8 +133,13 @@ private db (`%LOCALAPPDATA%\PrintLink\printlink-private.db`) — see
 - Expiry is enforced by the host on every job; client-side staleness is
   advisory only, so extending a grant on the host re-enables the sender
   without any re-pairing.
+- **TLS with pinned certificates (1.0)**: every agent serves HTTPS on
+  :9100 using a self-signed identity certificate; peers pin its fingerprint
+  at pairing and refuse any other — active man-in-the-middles can only
+  disconnect jobs, not read or alter them.
 - In-app updates: the agent checks GitHub releases daily (tray menu to
-  check manually) and installs with your explicit consent.
+  check manually), verifies the download's SHA256 against the release's
+  published checksum, and installs with your explicit consent.
 
 See `docs/protocol.md` for wire formats, `docs/architecture.md` for design,
 and `docs/security.md` for the threat model.

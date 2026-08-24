@@ -76,10 +76,13 @@ per-user printer lists and resurrect the "shared printer missing" bug.
 
 ## Remaining gaps / next hardening steps
 
-- **No TLS**: metadata is visible on the LAN and active MITMs can disrupt
-  (not read) jobs. Candidate: self-signed cert pinned per pairing.
-- **Legacy X-Token auth** remains available for old peers until
-  `LEGACY_TOKEN_AUTH` is switched off fleet-wide.
+- **Transport is now TLS (1.0)**: the API speaks HTTPS with a persistent
+  self-signed host certificate; senders pin its fingerprint from pairing
+  time and refuse any other certificate. Active MITMs can no longer read
+  or tamper with jobs — only disconnect them. Residual: a MITM present
+  during a host's very first pairing handshake could pin their own cert
+  (TOFU window of seconds, both users see confirmations); re-pairing
+  after a host reinstall re-pins intentionally.
 - **Untrusted file processing**: the host renders attacker-influenced files
   with PyMuPDF/GDI+/Word. Keep hosts patched; treat a hostile document as
   in-scope for those parsers (true of any print pipeline).

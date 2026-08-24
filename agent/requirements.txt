@@ -7,5 +7,4 @@ pymupdf==1.28.2
 pystray==0.19.5
 pywin32==312; sys_platform == 'win32'
 requests==2.34.2
-waitress==3.0.2
 zeroconf==0.150.0

@@ -67,7 +67,7 @@ def fast_sender(monkeypatch):
         monkeypatch.setattr(requests, "post", fake_post)
         db = FakeDB()
         s = Sender(db, "111 222 333", "test",
-                   lambda hid: ("127.0.0.1", 9100))
+                   lambda hid: ("127.0.0.1", 9100), probe_tls=False)
         return s, db
 
     return make
@@ -219,7 +219,7 @@ def _make_sender(monkeypatch, token="ab" * 32, ping_id="111222333",
     monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(requests, "post", fake_post)
     db = FakeDB(token=token)
-    s = Sender(db, "111 222 333", "t", lambda hid: ("127.0.0.1", 9100))
+    s = Sender(db, "111 222 333", "t", lambda hid: ("127.0.0.1", 9100), probe_tls=False)
     return s, cap
 
 

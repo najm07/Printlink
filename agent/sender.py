@@ -18,11 +18,40 @@ from identity import normalize_id, is_valid_id
 from shares import store_accepted_share, get_usable_printer
 from crypto import encrypt_payload
 from auth import sign_nonce, token_hint
+from tlsutil import probe_fingerprint, PinnedAdapterHosts
 from config import (CONNECT_TIMEOUT_S, READ_TIMEOUT_S, RETRY_INTERVAL_S,
                     RETRY_MAX_ATTEMPTS, ROUTE_VERIFY_TTL_S)
 from logutil import get_logger
 
 log = get_logger("sender")
+
+
+class RequestsHttp:
+    """Thin transport so tests can inject fakes; production calls with a
+    per-host pinned Session use it, everything else falls through to the
+    requests module (kept as an indirection point for test patching)."""
+
+    @staticmethod
+    def new_session(fingerprint_hex: str | None):
+        import urllib3
+        s = requests.Session()
+        if fingerprint_hex:
+            # fingerprint IS the trust anchor: no CA check needed
+            s.mount("https://", PinnedAdapterHosts.adapter(fingerprint_hex))
+        else:
+            s.verify = False     # first contact only — pinned immediately after
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        return s
+
+    def get(self, url, session=None, **kw):
+        if session is not None:
+            return session.get(url, **kw)
+        return requests.get(url, **kw)   # module indirection: test-patchable
+
+    def post(self, url, session=None, **kw):
+        if session is not None:
+            return session.post(url, **kw)
+        return requests.post(url, **kw)
 
 
 def _safe_json(resp) -> dict:
@@ -39,18 +68,23 @@ def _safe_json(resp) -> dict:
 
 class Sender:
     def __init__(self, db: Database, my_id: str, my_name: str, resolver,
-                 on_delivered=None, on_failed=None, on_printer_error=None):
+                 on_delivered=None, on_failed=None, on_printer_error=None,
+                 http=None, probe_tls=True):
         """resolver(host_id) -> (ip, port) or None  (from discovery.py)
         on_delivered(filepath, host_id, alias)      — job printed
         on_failed(filepath, host_id, alias, reason) — job given up on
         on_printer_error(filepath, host_id, alias, reason) — first failed
         attempt of a job (printer offline, paper out, host error, ...);
-        called once per job, before retries continue."""
+        called once per job, before retries continue.
+        http: transport override for tests. probe_tls=False skips TOFU
+        fingerprint capture (unit tests with fake transport)."""
         self.db, self.my_id, self.my_name = db, my_id, my_name
         self.resolver = resolver
         self.on_delivered = on_delivered
         self.on_failed = on_failed
         self.on_printer_error = on_printer_error
+        self.http = http or RequestsHttp()
+        self.probe_tls = probe_tls
         self._jobs: queue.Queue = queue.Queue()
         self._pending = 0
         self._ever_failed = False
@@ -63,6 +97,9 @@ class Sender:
         # host_id -> (base_url, valid_until): a route we /ping-verified as
         # really belonging to that ID (audit S2 — stale-IP impersonation).
         self._routes: dict[str, tuple[str, float]] = {}
+        # host_id -> pinned TLS session + fingerprint (1.0 transport)
+        self._tls_sessions: dict[str, requests.Session] = {}
+        self._fps: dict[str, str] = {}
         self._drained = threading.Event()
         self._drained.set()
         self._stop = threading.Event()
@@ -92,6 +129,57 @@ class Sender:
             except Exception:
                 log.exception("delivery callback failed for %s", filepath)
 
+    # ---------- transport (HTTPS with pinned host certificate) ----------
+    @staticmethod
+    def _row_tls_fp(row) -> str | None:
+        try:
+            return row["tls_fp"] if row else None
+        except (KeyError, IndexError):
+            return None
+
+    def _session_for(self, host_id: str):
+        """Pinned session for a host whose fingerprint we know; None means
+        'no fp yet' → caller must capture one via probe before sending."""
+        return self._tls_sessions.get(host_id)
+
+    def _set_host_fp(self, host_id: str, fp: str, persist=True) -> None:
+        self._fps[host_id] = fp
+        if host_id not in self._tls_sessions:
+            try:
+                self._tls_sessions[host_id] = \
+                    RequestsHttp.new_session(fp)
+            except Exception as e:
+                log.warning("could not build pinned session: %r", e)
+                return
+        if persist:
+            try:
+                self.db.update_remote_tls_fp(host_id, fp)
+            except Exception as e:
+                log.debug("tls_fp persist failed: %r", e)
+
+    def _ensure_host_fp(self, host_id: str, base: str) -> bool:
+        """True when we have (or just captured) the host's cert fingerprint.
+        Missing fp on an existing row = 0.4→1.0 upgrade: one TOFU capture."""
+        if self._fps.get(host_id) or self._tls_sessions.get(host_id):
+            return True
+        rp = next((r for r in self.db.list_remote_printers(status=None)
+                   if r["host_id"] == normalize_id(host_id)), None)
+        stored = self._row_tls_fp(rp)
+        if stored:
+            self._set_host_fp(host_id, stored, persist=False)
+            return True
+        if not self.probe_tls:
+            return False
+        ip = base.split("//")[1].split(":")[0]
+        port = int(base.rsplit(":", 1)[1])
+        fp = probe_fingerprint(ip, port)
+        if not fp:
+            return False
+        log.info("captured host certificate fingerprint %s… (%s)",
+                 fp[:12], host_id)
+        self._set_host_fp(host_id, fp, persist=bool(rp))
+        return True
+
     # ---------- address resolution + identity verification ----------
     def _base_url(self, host_id: str) -> str | None:
         host_id = normalize_id(host_id)
@@ -100,21 +188,22 @@ class Sender:
             ip, port = found
             self.db.update_remote_host_ip(host_id, ip, port)
             log.info("resolved %s -> %s:%s (mDNS)", host_id, ip, port)
-            return f"http://{ip}:{port}"
+            return f"https://{ip}:{port}"
         rp = next((r for r in self.db.list_remote_printers(status=None)
                    if r["host_id"] == host_id), None)
         if rp and rp["host_ip"]:
             log.info("resolved %s -> %s:%s (stored IP)", host_id,
                      rp["host_ip"], rp["host_port"])
-            return f"http://{rp['host_ip']}:{rp['host_port']}"
+            return f"https://{rp['host_ip']}:{rp['host_port']}"
         log.warning("could not resolve %s: mDNS miss and no stored IP", host_id)
         return None
 
-    def _identify(self, base: str) -> str | None:
+    def _identify(self, base: str, host_id: str | None = None) -> str | None:
         """Peer's self-reported ID from /ping; None when unreachable or
         the answer isn't a well-formed 200."""
         try:
-            r = requests.get(f"{base}/ping", timeout=CONNECT_TIMEOUT_S)
+            r = self.http.get(f"{base}/ping", timeout=CONNECT_TIMEOUT_S,
+                              session=self._session_for(host_id or ""))
         except requests.RequestException as e:
             log.warning("ping %s failed: %r", base, e)
             return None
@@ -124,8 +213,9 @@ class Sender:
         return peer or None
 
     def _verified_base_url(self, host_id: str) -> tuple[str | None, str | None]:
-        """Resolve an ID to an address AND verify that machine's identity
-        before anything sensitive is sent to it. Returns (base, error).
+        """Resolve an ID to an address, capture/pin the host certificate,
+        and verify that machine's identity before anything sensitive is
+        sent to it. Returns (base, error).
 
         Positive verifications are cached briefly so print retries don't
         re-ping on every attempt; mismatches drop the cached route."""
@@ -137,7 +227,11 @@ class Sender:
         if base is None:
             return None, ("Host not found on the LAN "
                           "(is it online and running PrintLink?)")
-        peer = self._identify(base)
+        # 1.0: pin the host certificate before the identity check itself —
+        # a MITM cannot answer /ping with someone else's ID over TLS unless
+        # they also present a cert we pinned at pairing time.
+        self._ensure_host_fp(host_id, base)
+        peer = self._identify(base, host_id)
         if peer is None:
             return None, f"Host at {base} did not answer its /ping properly."
         if peer != host_id:
@@ -146,13 +240,13 @@ class Sender:
         self._routes[host_id] = (base, time.monotonic() + ROUTE_VERIFY_TTL_S)
         return base, None
 
-    def _challenge(self, base: str) -> str | None:
-        """Fetch a single-use HMAC challenge. None => pre-0.3 host (or its
-        challenge endpoint failed) and callers fall back to legacy auth."""
+    def _challenge(self, base: str, host_id: str | None = None) -> str | None:
+        """Fetch a single-use HMAC challenge. None => the peer cannot do
+        HMAC auth (pre-1.0 agent or endpoint failure)."""
         try:
-            r = requests.get(f"{base}/auth-challenge",
-                             params={"sender_id": self.my_id},
-                             timeout=CONNECT_TIMEOUT_S)
+            r = self.http.get(f"{base}/auth-challenge", session=self._session_for(host_id or ""),
+                              params={"sender_id": self.my_id},
+                              timeout=CONNECT_TIMEOUT_S)
         except requests.RequestException as e:
             log.warning("auth-challenge %s failed: %r", base, e)
             return None
@@ -172,12 +266,18 @@ class Sender:
         if base is None:
             log.warning("request_share: %s", err)
             return False, err
+        # TOFU capture for first-time pairing (no db row yet): pin whatever
+        # cert this server presents, then sanity-check it against the
+        # fingerprint the host signs into its acceptance response.
+        self._ensure_host_fp(host_id, base)
         try:
             log.info("request_share: POST %s/request-share alias=%r days=%d",
                      base, printer_alias, days)
-            r = requests.post(f"{base}/request-share", json={
-                "sender_id": self.my_id, "sender_name": self.my_name,
-                "printer_alias": printer_alias, "days": days}, timeout=60)
+            r = self.http.post(f"{base}/request-share", session=self._session_for(host_id),
+                               json={"sender_id": self.my_id,
+                                     "sender_name": self.my_name,
+                                     "printer_alias": printer_alias,
+                                     "days": days}, timeout=60)
             log.info("request_share: HTTP %d -> %s", r.status_code,
                      _safe_json(r).get("status", r.text[:200]))
         except requests.RequestException as e:
@@ -188,11 +288,20 @@ class Sender:
             log.warning("request_share: non-JSON reply from %s: HTTP %d %r",
                         host_id, r.status_code, r.text[:120])
             return False, f"Host answered unexpectedly (HTTP {r.status_code})."
+        announced = j.get("tls_fp")
+        captured = self._fps.get(normalize_id(host_id))
+        if announced and captured and announced != captured:
+            log.error("request_share: certificate changed between probe and "
+                      "accept (%s… != %s…) — refusing", captured[:12],
+                      announced[:12])
+            return False, "Host certificate changed during pairing — abort."
         if r.status_code == 200 and j.get("status") == "accepted":
             ip = base.split("//")[1].split(":")[0]
             store_accepted_share(self.db, host_id, "", ip, printer_alias,
-                                 j["token"], j["expires_at"], name=name)
-            log.info("request_share: ACCEPTED for %s (%s) token saved", host_id, printer_alias)
+                                 j["token"], j["expires_at"], name=name,
+                                 tls_fp=announced or captured)
+            log.info("request_share: ACCEPTED for %s (%s) token saved",
+                     host_id, printer_alias)
             return True, f"Access granted until {j['expires_at']}."
         log.warning("request_share: refused by %s: %s", host_id,
                     j.get("reason", r.status_code))
@@ -211,7 +320,7 @@ class Sender:
             return False, f"{err} — local entry removed anyway"
         payload: dict = {"sender_id": self.my_id,
                          "printer_alias": printer_alias}
-        nonce = self._challenge(base)
+        nonce = self._challenge(base, host_id)
         if not nonce:
             return False, ("host runs an old PrintLink without secure "
                            "revocation — update it; entry removed locally")
@@ -219,8 +328,8 @@ class Sender:
         payload["nonce"] = nonce
         payload["signature"] = sign_nonce(rp["token"], nonce)
         try:
-            r = requests.post(f"{base}/revoke-grant", json=payload,
-                              timeout=CONNECT_TIMEOUT_S)
+            r = self.http.post(f"{base}/revoke-grant", session=self._session_for(host_id),
+                               json=payload, timeout=CONNECT_TIMEOUT_S)
             log.info("revoke_share %s '%s': HTTP %d", host_id, printer_alias,
                      r.status_code)
             if r.status_code == 200:
@@ -360,7 +469,9 @@ class Sender:
             with open(filepath, "rb") as f:
                 raw = f.read()
             payload = encrypt_payload(raw, rp["token"])
-            nonce = self._challenge(base)
+            # make sure the pinned session exists before anything sensitive
+            self._ensure_host_fp(host_id, base)
+            nonce = self._challenge(base, host_id)
             if not nonce:
                 # 1.0 removed the plaintext X-Token fallback: a host without
                 # HMAC support cannot be talked to securely.
@@ -379,11 +490,11 @@ class Sender:
             data = None
             if options:
                 data = {"options": json.dumps(options)}
-            r = requests.post(f"{base}/print",
-                              headers=headers,
-                              files={"file": (Path(filepath).name, payload)},
-                              data=data,
-                              timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
+            r = self.http.post(f"{base}/print", session=self._session_for(host_id),
+                               headers=headers,
+                               files={"file": (Path(filepath).name, payload)},
+                               data=data,
+                               timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
             log.info("send %s -> HTTP %d body=%s", Path(filepath).name,
                      r.status_code, r.text[:200])
             if r.status_code == 200:

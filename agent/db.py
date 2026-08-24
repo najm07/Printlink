@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS remote_printers (
     host_port INTEGER NOT NULL DEFAULT 9100,
     printer_alias TEXT NOT NULL,
     name TEXT,                           -- user-defined display name (client-side)
+    tls_fp TEXT,                         -- pinned SHA256 of the host certificate
     token TEXT NOT NULL,               -- token the host issued to us
     granted_at TEXT NOT NULL DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL,
@@ -237,8 +238,9 @@ class Database:
 
         with self.connect_private() as con:
             cols = {r[1] for r in con.execute("PRAGMA table_info(remote_printers)")}
-            if "name" not in cols:
-                con.execute("ALTER TABLE remote_printers ADD COLUMN name TEXT")
+            for col in ("name", "tls_fp"):
+                if col not in cols:
+                    con.execute(f"ALTER TABLE remote_printers ADD COLUMN {col} TEXT")
 
     @contextmanager
     def connect_shared(self):
@@ -376,19 +378,21 @@ class Database:
     # ---- client side: remote printers (PRIVATE db) ----
     def upsert_remote_printer(self, host_id, printer_alias, token, expires_at,
                               host_ip=None, host_name=None, host_port=9100,
-                              name=None) -> None:
+                              name=None, tls_fp=None) -> None:
         with self.connect_private() as con:
             con.execute(
                 """INSERT INTO remote_printers
-                       (host_id, host_name, host_ip, host_port, printer_alias, name, token, expires_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       (host_id, host_name, host_ip, host_port, printer_alias,
+                        name, tls_fp, token, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(host_id, printer_alias) DO UPDATE SET
                        token=excluded.token, expires_at=excluded.expires_at,
                        host_ip=excluded.host_ip, host_name=excluded.host_name,
                        host_port=excluded.host_port,
+                       tls_fp=COALESCE(excluded.tls_fp, remote_printers.tls_fp),
                        granted_at=datetime('now'), status='active'""",
                 (host_id, host_name, host_ip, host_port, printer_alias, name,
-                 token, expires_at))
+                 tls_fp, token, expires_at))
 
     def set_remote_printer_name(self, host_id: str, printer_alias: str,
                                 name: str | None) -> None:
@@ -421,3 +425,8 @@ class Database:
         with self.connect_private() as con:
             con.execute("UPDATE remote_printers SET host_ip = ?, host_port = ? WHERE host_id = ?",
                         (ip, port, host_id))
+
+    def update_remote_tls_fp(self, host_id: str, tls_fp: str) -> None:
+        with self.connect_private() as con:
+            con.execute("UPDATE remote_printers SET tls_fp = ? WHERE host_id = ?",
+                        (tls_fp, host_id))

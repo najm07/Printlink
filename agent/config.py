@@ -6,7 +6,7 @@ from pathlib import Path
 APP_NAME = "PrintLink"
 
 # Keep in sync with MyAppVersion in installer/printlink.iss
-VERSION = "0.4.0"
+VERSION = "1.0.0"
 
 # --- storage (split since 0.3, see docs/security.md) ---
 # SHARED: %PROGRAMDATA%\PrintLink — machine-wide, nothing secret. Holds the
@@ -41,6 +41,7 @@ DB_FILE = DATA_DIR / "printlink.db"                # shared db (printers only)
 PRIVATE_DB_FILE = PRIVATE_DIR / "printlink-private.db"  # tokens (per-user)
 IDENTITY_FILE = DATA_DIR / "identity.json"
 TARGET_FILE = PRIVATE_DIR / "target.json"          # last tray-selected remote
+TLS_CERT_FILE = DATA_DIR / "printlink-tls.pem"     # host identity (key+cert)
 
 # --- network ---
 LISTEN_PORT = 9100                 # HTTP API port (TCP, firewall-opened)

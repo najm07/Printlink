@@ -9,13 +9,16 @@ Endpoints:
 Run in a background thread from the tray app.
 """
 import json
+import io
 import os
+import ssl
 import tempfile
 import threading
 import time
 from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import waitress
+from urllib.parse import urlsplit, unquote
 from flask import Flask, request, jsonify
 from cryptography.exceptions import InvalidTag
 
@@ -29,9 +32,10 @@ from printer_local import (printer_status, print_via_shell,
 from identity import is_valid_id, normalize_id
 from crypto import decrypt_payload
 from auth import new_nonce
+from tlsutil import generate_host_cert, load_cert_fingerprint
 from config import (LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME, VERSION,
                     MAX_SHARE_DAYS, RATE_SHARE_WINDOW_S, RATE_SHARE_MAX,
-                    AUTH_NONCE_TTL_S, AUTH_MAX_NONCES)
+                    AUTH_NONCE_TTL_S, AUTH_MAX_NONCES, TLS_CERT_FILE)
 from logutil import get_logger, clean
 
 log = get_logger("server")
@@ -58,6 +62,13 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = MAX_JOB_MB * 1024 * 1024
     queue_dir = Path(tempfile.gettempdir()) / INBOX_DIR_NAME
     queue_dir.mkdir(exist_ok=True)
+    # persistent host identity: every grant is bound to this certificate
+    try:
+        generate_host_cert(TLS_CERT_FILE, normalize_id(my_id))
+        tls_fp = load_cert_fingerprint(TLS_CERT_FILE)
+    except OSError as e:
+        log.error("TLS identity unavailable (%r) — HTTPS cannot start", e)
+        raise
     log.info("HTTP server created on port %d (id=%s, max job %d MB)",
              LISTEN_PORT, my_id, MAX_JOB_MB)
 
@@ -121,7 +132,8 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     @app.get("/ping")
     def ping():
         log.info("GET /ping from %s", request.remote_addr)
-        return jsonify({"id": my_id, "ok": True, "version": VERSION})
+        return jsonify({"id": my_id, "ok": True, "version": VERSION,
+                        "tls": True})
 
     @app.get("/auth-challenge")
     def auth_challenge():
@@ -185,7 +197,8 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
         log.info("request-share ACCEPTED: grant for %s on '%s' expires %s",
                  sender_id, alias, grant["expires_at"])
         return jsonify({"status": "accepted", "token": grant["token"],
-                        "expires_at": grant["expires_at"]})
+                        "expires_at": grant["expires_at"],
+                        "tls_fp": tls_fp})
 
     @app.post("/revoke-grant")
     def revoke_grant():
@@ -316,12 +329,117 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     return app
 
 
-def run_in_thread(app: Flask, port: int = LISTEN_PORT) -> threading.Thread:
-    log.info("HTTP server listening on 0.0.0.0:%d (waitress)", port)
-    t = threading.Thread(
-        target=waitress.serve,
-        args=(app,),
-        kwargs={"host": "0.0.0.0", "port": port, "threads": 8},
-        daemon=True, name="printlink-server")
-    t.start()
-    return t
+def run_in_thread(app: Flask, port: int = LISTEN_PORT,
+                  tls_cert: Path | None = None) -> threading.Thread:
+    """Serve the app on a daemon thread over TLS (stdlib threaded WSGI).
+
+    Deliberately not waitress/gunicorn: they are proxy-oriented and this
+    waitress build ships no TLS. A ThreadingHTTPServer wrapped in an
+    SSLContext is plenty for LAN print traffic and keeps us stdlib-only."""
+    tls = tls_cert or TLS_CERT_FILE
+    ctx = None
+    scheme = "HTTP"
+    if Path(tls).exists():
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(str(tls))          # PEM holds key + cert together
+        scheme = "HTTPS"
+    log.info("%s server listening on 0.0.0.0:%d", scheme, port)
+
+    class Handler(_TLSWSGIHandler):
+        app_ref = app
+        max_body = MAX_JOB_MB * 1024 * 1024
+
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    httpd.daemon_threads = True
+    httpd.tls = ctx is not None
+    if ctx is not None:
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+
+    def _serve():
+        try:
+            httpd.serve_forever()
+        except Exception:
+            log.exception("server crashed")
+
+    threading.Thread(target=_serve, daemon=True,
+                     name="printlink-server").start()
+    return None
+
+
+class _TLSWSGIHandler(BaseHTTPRequestHandler):
+    """Minimal WSGI bridge over BaseHTTPRequestHandler (GET/POST/HEAD —
+    the whole PrintLink API surface)."""
+    protocol_version = "HTTP/1.1"
+    app_ref = None
+    max_body = 100 * 1024 * 1024
+
+    def _wsgi_env(self, body: bytes) -> dict:
+        parsed = urlsplit(self.path)
+        addr = self.server.server_address
+        return {
+            "REQUEST_METHOD": self.command,
+            "PATH_INFO": unquote(parsed.path),
+            "QUERY_STRING": parsed.query,
+            "SERVER_NAME": str(addr[0]),
+            "SERVER_PORT": str(addr[1]),
+            "SERVER_PROTOCOL": self.request_version,
+            "CONTENT_LENGTH": str(len(body)),
+            "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            "wsgi.version": (1, 0),
+            "wsgi.url_scheme": "https" if getattr(self.server, "tls", False)
+                               else "http",
+            "wsgi.input": io.BytesIO(body),
+            "wsgi.errors": io.StringIO(),
+            "wsgi.multithread": True,
+            "wsgi.multiprocess": False,
+            "wsgi.run_once": False,
+        }
+
+    def _dispatch(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > self.max_body:
+            self.send_error(413, "Payload too large")
+            return
+        body = self.rfile.read(length) if length else b""
+        captured: dict = {}
+
+        def start_response(status, headers, exc_info=None):
+            captured["status"] = status
+            captured["headers"] = headers
+
+        try:
+            result = self.app_ref(self._wsgi_env(body), start_response)
+            try:
+                payload = b"".join(result)
+            finally:
+                if hasattr(result, "close"):
+                    result.close()
+        except Exception:
+            log.exception("request %s %s crashed", self.command, self.path)
+            try:
+                self.send_error(500, "internal error")
+            except OSError:
+                pass
+            return
+        code = int(captured["status"].split()[0])
+        headers = [(k, v) for k, v in captured["headers"]
+                   if k.lower() not in ("content-length", "connection",
+                                        "transfer-encoding")]
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(payload)))
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+
+    do_GET = _dispatch
+    do_POST = _dispatch
+    do_HEAD = _dispatch
+
+    def log_message(self, fmt, *args):     # route into printlink logging
+        log.debug("%s %s", self.address_string(), fmt % args)
