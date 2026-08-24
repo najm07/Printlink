@@ -285,7 +285,11 @@ class PrintLinkTray:
             return out.get("v")
         picked = _dialog(ui)
         if picked and picked[1]:
-            self.db.add_shared_printer(picked[0], picked[1])
+            try:
+                self.db.add_shared_printer(picked[0], picked[1])
+            except ValueError as e:
+                _notify("PrintLink", str(e))
+                return
             log.info("shared printer '%s' as alias '%s'", picked[0], picked[1])
             _notify("PrintLink", f"'{picked[0]}' is now shared as '{picked[1]}'.")
 
@@ -403,7 +407,11 @@ class PrintLinkTray:
             alias = _dialog(lambda root: simpledialog.askstring(
                 "PrintLink", "New alias (remote users will see this):"))
             if alias and alias.strip():
-                self.db.update_shared_printer_alias(value, alias.strip())
+                try:
+                    self.db.update_shared_printer_alias(value, alias.strip())
+                except ValueError as e:
+                    _notify("PrintLink", str(e))
+                    return
                 _notify("PrintLink", f"Alias updated to '{alias.strip()}'.")
             return
         if action == "unshare":
@@ -536,7 +544,8 @@ class PrintLinkTray:
             log.info("update to %s declined by user", tag)
             return
         import updater as upd
-        ok, msg = upd.download_and_install(info["asset_url"], tag)
+        ok, msg = upd.download_and_install(info["asset_url"], tag,
+                                           sha_url=info.get("sha_url"))
         if not ok:
             _notify("PrintLink", msg)
             return

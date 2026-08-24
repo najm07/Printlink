@@ -54,12 +54,18 @@ def request_share(client, sender="111 222 333", alias="Accounting-HP"):
 
 def do_print(client, token, sender="111 222 333", payload=b"%PDF-1.4 test",
              options=None):
+    """Proof-path print (1.0 has no legacy X-Token auth)."""
+    nonce = _challenge(client, sender)
     body = encrypt_payload(payload, token)
     fields = {"file": (io.BytesIO(body), "doc.pdf")}
     if options is not None:
         import json
         fields["options"] = json.dumps(options)
-    return client.post("/print", headers={"X-Sender-ID": sender, "X-Token": token},
+    return client.post("/print",
+                       headers={"X-Sender-ID": sender,
+                                "X-Token-Hint": token_hint(token),
+                                "X-Nonce": nonce,
+                                "X-Signature": sign_nonce(token, nonce)},
                        data=fields, content_type="multipart/form-data")
 
 
@@ -97,17 +103,27 @@ def test_decline_403(tmp_path):
 def test_revoke_grant(env):
     client, db = env
     token = request_share(client).get_json()["token"]
+    # legacy body-token is refused outright in 1.0
     r = client.post("/revoke-grant",
-                    json={"sender_id": "111 222 333", "printer_alias": "Ghost",
-                          "token": token})
+                    json={"sender_id": "111 222 333",
+                          "printer_alias": "Accounting-HP", "token": token})
     assert r.status_code == 404
+    assert "removed in PrintLink 1.0" in r.get_json()["reason"]
+    # wrong signature over its own fresh challenge -> no matching grant
+    wrong_nonce = _challenge(client)
     r = client.post("/revoke-grant",
-                    json={"sender_id": "111 222 333", "printer_alias": "Accounting-HP",
-                          "token": "wrong"})
+                    json={"sender_id": "111 222 333",
+                          "printer_alias": "Accounting-HP",
+                          "nonce": wrong_nonce,
+                          "signature": sign_nonce("wrong" * 8, wrong_nonce)})
     assert r.status_code == 404
+    # correct HMAC proof over its own fresh challenge revokes
+    nonce = _challenge(client)
     r = client.post("/revoke-grant",
-                    json={"sender_id": "111 222 333", "printer_alias": "Accounting-HP",
-                          "token": token})
+                    json={"sender_id": "111 222 333",
+                          "printer_alias": "Accounting-HP",
+                          "nonce": nonce,
+                          "signature": sign_nonce(token, nonce)})
     assert r.status_code == 200 and r.get_json()["status"] == "revoked"
     assert db.list_grants()[0]["status"] == "revoked"
 
@@ -120,7 +136,7 @@ def test_bad_token_403(env):
 def test_no_file_400(env):
     client, _ = env
     token = request_share(client).get_json()["token"]
-    r = client.post("/print", headers={"X-Sender-ID": "111 222 333", "X-Token": token})
+    r = client.post("/print", headers=_proof_headers(client, token))
     assert r.status_code == 400
 
 
@@ -138,7 +154,7 @@ def test_print_word_docx(env):
             b"\x00\x00\x00\x00\x00\x00\x00\x00"
             b"word/document.xml")
     body = encrypt_payload(docx, token)
-    r = client.post("/print", headers={"X-Sender-ID": "111 222 333", "X-Token": token},
+    r = client.post("/print", headers=_proof_headers(client, token),
                     data={"file": (io.BytesIO(body), "doc.docx")},
                     content_type="multipart/form-data")
     assert r.status_code == 200 and r.get_json()["status"] == "accepted"
@@ -151,7 +167,7 @@ def test_print_png(env):
     token = request_share(client).get_json()["token"]
     png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
     body = encrypt_payload(png, token)
-    r = client.post("/print", headers={"X-Sender-ID": "111 222 333", "X-Token": token},
+    r = client.post("/print", headers=_proof_headers(client, token),
                     data={"file": (io.BytesIO(body), "pic.png")},
                     content_type="multipart/form-data")
     assert r.status_code == 200 and r.get_json()["status"] == "accepted"
@@ -248,7 +264,7 @@ def test_print_tampered_ciphertext_401(env):
     token = request_share(client).get_json()["token"]
     blob = b"\x00" * 48          # right length, wrong everything else
     r = client.post("/print",
-                    headers={"X-Sender-ID": "111 222 333", "X-Token": token},
+                    headers=_proof_headers(client, token),
                     data={"file": (io.BytesIO(blob), "x.pdf")},
                     content_type="multipart/form-data")
     assert r.status_code == 401
@@ -266,7 +282,7 @@ def test_print_failure_returns_generic_body(env, monkeypatch):
     monkeypatch.setattr(server_mod, "print_pdf", boom)
     body = encrypt_payload(b"%PDF-1.4 x", token)
     r = client.post("/print",
-                    headers={"X-Sender-ID": "111 222 333", "X-Token": token},
+                    headers=_proof_headers(client, token),
                     data={"file": (io.BytesIO(body), "doc.pdf")},
                     content_type="multipart/form-data")
     assert r.status_code == 500
@@ -279,6 +295,15 @@ def _challenge(client, sender="111 222 333"):
     r = client.get("/auth-challenge", query_string={"sender_id": sender})
     assert r.status_code == 200
     return r.get_json()["nonce"]
+
+
+def _proof_headers(client, token, sender="111 222 333"):
+    """Auth headers for ONE request: fetches a fresh single-use nonce."""
+    nonce = _challenge(client, sender)
+    return {"X-Sender-ID": sender,
+            "X-Token-Hint": token_hint(token),
+            "X-Nonce": nonce,
+            "X-Signature": sign_nonce(token, nonce)}
 
 
 def _do_print_proof(client, token, sender="111 222 333",
@@ -353,21 +378,18 @@ def test_expired_nonce_rejected(env, monkeypatch):
     assert r.get_json()["error"] == "invalid or expired challenge"
 
 
-def test_legacy_token_still_accepted_while_enabled(env):
-    """Pre-0.3 senders keep working during the transition window."""
+def test_legacy_token_rejected_after_removal(env):
+    """1.0 removed the pre-0.3 X-Token path: senders get a clear upgrade
+    error instead of a silent downgrade."""
     client, _db = env
     token = request_share(client).get_json()["token"]
-    r = do_print(client, token)          # legacy X-Token header path
-    assert r.status_code == 200
-
-
-def test_legacy_token_rejected_when_disabled(env, monkeypatch):
-    monkeypatch.setattr(server_mod, "LEGACY_TOKEN_AUTH", False)
-    client, _db = env
-    token = request_share(client).get_json()["token"]
-    r = do_print(client, token)
+    body = encrypt_payload(b"%PDF-1.4 x", token)
+    r = client.post("/print",
+                    headers={"X-Sender-ID": "111 222 333", "X-Token": token},
+                    data={"file": (io.BytesIO(body), "doc.pdf")},
+                    content_type="multipart/form-data")
     assert r.status_code == 403
-    assert "update PrintLink" in r.get_json()["error"]
+    assert "removed in PrintLink 1.0" in r.get_json()["error"]
 
 
 def test_missing_credentials_403(env):

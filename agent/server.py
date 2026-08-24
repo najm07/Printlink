@@ -15,13 +15,13 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+import waitress
 from flask import Flask, request, jsonify
 from cryptography.exceptions import InvalidTag
 
 from db import Database
-from shares import (create_grant, authorize_print, authorize_print_proof,
-                    revoke_remote_share, revoke_remote_share_proof,
-                    DEFAULT_SHARE_DAYS)
+from shares import (create_grant, authorize_print_proof,
+                    revoke_remote_share_proof, DEFAULT_SHARE_DAYS)
 from printer_local import (printer_status, print_via_shell,
                            print_text, print_emf, print_word, print_image,
                            print_pdf, sniff_format, extract_emf,
@@ -31,7 +31,7 @@ from crypto import decrypt_payload
 from auth import new_nonce
 from config import (LISTEN_PORT, MAX_JOB_MB, INBOX_DIR_NAME, VERSION,
                     MAX_SHARE_DAYS, RATE_SHARE_WINDOW_S, RATE_SHARE_MAX,
-                    AUTH_NONCE_TTL_S, AUTH_MAX_NONCES, LEGACY_TOKEN_AUTH)
+                    AUTH_NONCE_TTL_S, AUTH_MAX_NONCES)
 from logutil import get_logger, clean
 
 log = get_logger("server")
@@ -84,7 +84,6 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
     # Single-use auth challenges: nonce -> expiry (monotonic). Lost on
     # restart by design — senders fetch a fresh challenge per attempt.
     nonces: dict[str, float] = {}
-    _legacy_warned: set[str] = set()
 
     def _issue_nonce(sender_id: str) -> str | None:
         if not is_valid_id(sender_id):
@@ -104,15 +103,8 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
         exp = nonces.pop(nonce, None)
         return exp is not None and exp >= time.monotonic()
 
-    def _warn_legacy_once(sender_id: str) -> None:
-        if sender_id not in _legacy_warned:
-            _legacy_warned.add(sender_id)
-            log.warning("sender %s used legacy X-Token auth (pre-0.3 agent) "
-                        "— ask them to update PrintLink", clean(sender_id))
-
     def _authenticate(sender_id: str) -> dict:
-        """HMAC proof preferred; legacy X-Token header tolerated until the
-        fleet has updated (config.LEGACY_TOKEN_AUTH)."""
+        """HMAC proof only — the pre-1.0 X-Token path was removed."""
         hint = request.headers.get("X-Token-Hint", "")
         nonce = request.headers.get("X-Nonce", "")
         sig = request.headers.get("X-Signature", "")
@@ -120,13 +112,10 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
             if not _take_nonce(nonce):
                 return {"ok": False, "error": "invalid or expired challenge"}
             return authorize_print_proof(db, sender_id, hint, nonce, sig)
-        legacy = request.headers.get("X-Token", "")
-        if legacy:
-            if LEGACY_TOKEN_AUTH:
-                _warn_legacy_once(sender_id)
-                return authorize_print(db, sender_id, legacy)
+        if request.headers.get("X-Token"):
             return {"ok": False,
-                    "error": "legacy token auth disabled; update PrintLink"}
+                    "error": "token auth was removed in PrintLink 1.0 — "
+                             "update PrintLink on the sending PC"}
         return {"ok": False, "error": "missing credentials"}
 
     @app.get("/ping")
@@ -213,8 +202,9 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
                 res = revoke_remote_share_proof(db, sender_id, alias_raw,
                                                 nonce, sig)
         elif data.get("token"):
-            _warn_legacy_once(sender_id)
-            res = revoke_remote_share(db, sender_id, alias_raw, data["token"])
+            res = {"ok": False,
+                   "error": "token auth was removed in PrintLink 1.0 — "
+                            "update PrintLink on the sending PC"}
         else:
             res = {"ok": False, "error": "missing credentials"}
         if not res["ok"]:
@@ -327,9 +317,11 @@ def create_app(db: Database, my_id: str, on_share_request=None) -> Flask:
 
 
 def run_in_thread(app: Flask, port: int = LISTEN_PORT) -> threading.Thread:
-    log.info("HTTP server listening on 0.0.0.0:%d", port)
+    log.info("HTTP server listening on 0.0.0.0:%d (waitress)", port)
     t = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False),
+        target=waitress.serve,
+        args=(app,),
+        kwargs={"host": "0.0.0.0", "port": port, "threads": 8},
         daemon=True, name="printlink-server")
     t.start()
     return t

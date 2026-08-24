@@ -208,12 +208,12 @@ class Sender:
         payload: dict = {"sender_id": self.my_id,
                          "printer_alias": printer_alias}
         nonce = self._challenge(base)
-        if nonce:
-            # 0.3 host: prove ownership without sending the token
-            payload["nonce"] = nonce
-            payload["signature"] = sign_nonce(rp["token"], nonce)
-        else:
-            payload["token"] = rp["token"]   # pre-0.3 host
+        if not nonce:
+            return False, ("host runs an old PrintLink without secure "
+                           "revocation — update it; entry removed locally")
+        # prove ownership without sending the token
+        payload["nonce"] = nonce
+        payload["signature"] = sign_nonce(rp["token"], nonce)
         try:
             r = requests.post(f"{base}/revoke-grant", json=payload,
                               timeout=CONNECT_TIMEOUT_S)
@@ -277,18 +277,22 @@ class Sender:
             with open(filepath, "rb") as f:
                 raw = f.read()
             payload = encrypt_payload(raw, rp["token"])
-            headers = {"X-Sender-ID": self.my_id}
             nonce = self._challenge(base)
-            if nonce:
-                # 0.3: prove possession of the token; never send it
-                headers["X-Token-Hint"] = token_hint(rp["token"])
-                headers["X-Nonce"] = nonce
-                headers["X-Signature"] = sign_nonce(rp["token"], nonce)
-            else:
-                headers["X-Token"] = rp["token"]   # pre-0.3 host
-            log.info("send %s -> %s/print (%d -> %d encrypted bytes, alias=%s, auth=%s)",
-                     filepath, base, len(raw), len(payload), printer_alias,
-                     "hmac" if nonce else "legacy")
+            if not nonce:
+                # 1.0 removed the plaintext X-Token fallback: a host without
+                # HMAC support cannot be talked to securely.
+                self.last_error = ("Host did not offer an auth challenge — "
+                                   "it runs an old PrintLink. Update "
+                                   "PrintLink on BOTH PCs.")
+                log.warning("send %s: no challenge from %s; giving up",
+                            filepath, base)
+                return False, False
+            headers = {"X-Sender-ID": self.my_id,
+                       "X-Token-Hint": token_hint(rp["token"]),
+                       "X-Nonce": nonce,
+                       "X-Signature": sign_nonce(rp["token"], nonce)}
+            log.info("send %s -> %s/print (%d -> %d encrypted bytes, alias=%s, auth=hmac)",
+                     filepath, base, len(raw), len(payload), printer_alias)
             data = None
             if options:
                 data = {"options": json.dumps(options)}

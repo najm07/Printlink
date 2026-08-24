@@ -52,20 +52,16 @@ def _check_grant_usable(db: Database, grant) -> dict:
     return {"ok": True, "printer": printer, "grant": grant}
 
 
-def authorize_print(db: Database, remote_id: str, token: str) -> dict:
-    """Legacy gate (pre-0.3 peers): match by the raw X-Token header value."""
-    grant = db.find_grant(normalize_id(remote_id), token)
-    if grant is None:
-        return {"ok": False, "error": "unknown ID or token"}
-    return _check_grant_usable(db, grant)
-
-
 def authorize_print_proof(db: Database, remote_id: str, hint: str,
                           nonce: str, proof: str) -> dict:
-    """0.3 gate: find the grant by its non-secret hint, then verify the
-    HMAC proof the sender computed over the host's fresh nonce. The token
-    itself never crossed the network."""
-    for grant in db.list_grants_for_remote(normalize_id(remote_id)):
+    """Gate every incoming /print job: find the grant by its non-secret
+    hint, then verify the HMAC proof the sender computed over the host's
+    fresh nonce. The token itself never crossed the network.
+
+    Lookup deliberately ignores status so revoked/expired grants answer
+    with their specific reason instead of a generic unknown-ID."""
+    for grant in db.list_grants_for_remote(normalize_id(remote_id),
+                                           status=None):
         if token_hint(grant["token"]) != hint:
             continue
         if not verify_nonce(grant["token"], nonce, proof):
@@ -88,21 +84,9 @@ def extend_grant(db: Database, grant_id: int, days: int = DEFAULT_SHARE_DAYS) ->
     return _fmt(expires)
 
 
-def revoke_remote_share(db: Database, remote_id: str, printer_alias: str,
-                        token: str) -> dict:
-    """Legacy path: the remote proves ownership by sending the token itself."""
-    grant = db.find_grant_by_remote_and_alias(normalize_id(remote_id), printer_alias)
-    if grant is None:
-        return {"ok": False, "error": "no grant for this ID and printer"}
-    if grant["token"] != token:
-        return {"ok": False, "error": "token mismatch"}
-    db.set_grant_status(grant["id"], "revoked")
-    return {"ok": True}
-
-
 def revoke_remote_share_proof(db: Database, remote_id: str, printer_alias: str,
                               nonce: str, proof: str) -> dict:
-    """0.3 path: same as revoke_remote_share but proven by HMAC over a
+    """POST /revoke-grant: the remote proves ownership via HMAC over a
     fresh challenge — no token in the request body."""
     for grant in db.find_grants_by_remote_and_alias(
             normalize_id(remote_id), printer_alias):

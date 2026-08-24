@@ -59,12 +59,12 @@ RATE_SHARE_WINDOW_S = 900          # sliding window per client IP
 RATE_SHARE_MAX = 5                 # max /request-share calls per window
 SHARE_DIALOG_TIMEOUT_S = 60        # unanswered accept dialog auto-declines
 
-# --- wire auth (0.3): HMAC proof instead of transmitting the token ---
+# --- wire auth (0.3+): HMAC proof instead of transmitting the token ---
 AUTH_NONCE_TTL_S = 120             # how long a host-issued nonce stays valid
 AUTH_MAX_NONCES = 256              # bounded memory against challenge floods
-LEGACY_TOKEN_AUTH = True           # accept X-Token from pre-0.3 agents;
-                                   # flip off once every PC has updated
 ROUTE_VERIFY_TTL_S = 60            # trust a /ping-verified route this long
+# 1.0 removed the pre-0.3 X-Token fallback entirely; peers without HMAC
+# support get a clear "update PrintLink" error instead of a silent downgrade.
 
 # --- sender retry ---
 RETRY_INTERVAL_S = 15

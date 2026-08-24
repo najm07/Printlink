@@ -10,9 +10,14 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from db import Database
-from shares import (create_grant, authorize_print, authorize_print_proof,
+from shares import (create_grant, authorize_print_proof,
                     sweep_expired_grants, extend_grant)
 from auth import sign_nonce, token_hint
+
+
+def _auth(db, remote_id, token, nonce="n"):
+    return authorize_print_proof(db, remote_id, token_hint(token),
+                                 nonce, sign_nonce(token, nonce))
 
 
 EXP_FMT = "%Y-%m-%d %H:%M:%S"
@@ -41,7 +46,7 @@ def test_readd_after_expiry_rotates_token(host):
     g1 = create_grant(db, "111222333", "Client-PC", pid)
     _expire_all_grants(db)
     sweep_expired_grants(db)
-    assert authorize_print(db, "111222333", g1["token"])["error"] == "share expired"
+    assert _auth(db, "111222333", g1["token"])["error"] == "share expired"
 
     # client re-adds: same remote+printer -> upsert must rotate + reactivate
     g2 = create_grant(db, "111222333", "Client-PC", pid)
@@ -66,7 +71,7 @@ def test_extend_expired_grant_reactivates_for_existing_token(host):
     extend_grant(db, db.list_grants()[0]["id"], 7)
     grant = db.list_grants()[0]
     assert grant["status"] == "active"
-    res = authorize_print(db, "111222333", g["token"])
+    res = _auth(db, "111222333", g["token"])
     assert res["ok"], f"extended grant must accept the original token: {res}"
 
 

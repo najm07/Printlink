@@ -108,3 +108,37 @@ def test_background_check_force_runs_and_stamps(tmp_path, monkeypatch):
     t.join(timeout=5)
     assert fired == []                                # same version -> no prompt
     assert (tmp_path / ".stamp").exists()
+
+
+# ---------- 1.0: SHA256-verified downloads ---------------------------------
+
+def test_fetch_latest_release_includes_checksum_url(monkeypatch):
+    body = _release()
+    body["assets"].append(
+        {"name": "checksums.txt",
+         "browser_download_url": "https://x/checksums.txt"})
+    monkeypatch.setattr(requests, "get",
+                        lambda url, timeout=None, headers=None:
+                        FakeResp(200, body))
+    rel = upd.fetch_latest_release()
+    assert rel["sha_url"] == "https://x/checksums.txt"
+
+
+def test_expected_hash_parses_sha256sum_format():
+    h1 = "a" * 64
+    h2 = "b" * 64
+    text = (f"{h1}  PrintLinkSetup-1.0.0.exe\n"
+            f"{h2} *other-file.zip\n"
+            "not-a-hash  ignored.txt\n")
+    assert upd.expected_hash(text, "printlinksetup-1.0.0.exe") == h1
+    assert upd.expected_hash(text, "other-file.zip") == h2
+    assert upd.expected_hash(text, "missing.exe") is None
+
+
+def test_verify_file_hash(tmp_path):
+    f = tmp_path / "setup.exe"
+    f.write_bytes(b"installer-bytes" * 1000)
+    import hashlib
+    good = hashlib.sha256(f.read_bytes()).hexdigest()
+    assert upd.verify_file_hash(f, good)
+    assert not upd.verify_file_hash(f, "0" * 64)

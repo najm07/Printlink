@@ -39,4 +39,10 @@ if (-not (Test-Path $Iscc)) { throw "Inno Setup compiler not found: $Iscc" }
 & $Iscc "/DMyAppVersion=$version" installer\printlink.iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
-Write-Host "== Done: installer\output\PrintLinkSetup-$version.exe =="
+# Publish the installer's SHA256 so in-app updates can verify the download.
+$exe = "installer\output\PrintLinkSetup-$version.exe"
+$hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+"$hash  PrintLinkSetup-$version.exe" | Set-Content -Encoding ascii `
+    installer\output\checksums.txt
+
+Write-Host "== Done: $exe + checksums.txt =="

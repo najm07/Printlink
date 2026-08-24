@@ -239,13 +239,15 @@ def test_print_sends_hmac_headers_not_token(monkeypatch, tmp_path):
     assert h["X-Signature"] == sign_nonce("ab" * 32, "nonce-9")
 
 
-def test_print_falls_back_to_token_without_challenge(monkeypatch, tmp_path):
-    s, cap = _make_sender(monkeypatch, challenge=None)   # pre-0.3 host
-    assert s.print_file(_doc(tmp_path), "111222333", "CANON")[0]
-    assert s.wait_idle(timeout=5)
-    h = cap["posts"][0]["headers"]
-    assert h.get("X-Token") == "ab" * 32
-    assert "X-Signature" not in h
+def test_print_refuses_host_without_challenge(monkeypatch, tmp_path):
+    """1.0 removed the plaintext X-Token fallback: no challenge -> permanent
+    failure with an upgrade hint, and NOTHING is posted."""
+    s, cap = _make_sender(monkeypatch, challenge=None)
+    ok, _ = s.print_file(_doc(tmp_path), "111222333", "CANON")
+    assert ok
+    assert s.wait_idle(timeout=5) is False
+    assert cap["posts"] == []
+    assert "old PrintLink" in (s.last_error or "")
 
 
 def test_identity_mismatch_blocks_send_and_never_caches(monkeypatch, tmp_path):

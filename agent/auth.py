@@ -13,8 +13,8 @@ every future job. Since 0.3 the token never crosses the network:
      stored nonce (single-use, short TTL) and compares in constant time.
 
 Replay is dead because nonces are consumed; sniffing yields nothing usable.
-Legacy X-Token peers keep working behind config.LEGACY_TOKEN_AUTH until the
-fleet has updated.
+Since 1.0 this is the ONLY wire auth — the pre-0.3 plaintext X-Token path
+was removed from both ends.
 """
 import hashlib
 import hmac

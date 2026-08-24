@@ -20,6 +20,72 @@ def test_unique_local_name(db):
         db.add_shared_printer("HP", "b")
 
 
+def test_alias_must_be_unique(db):
+    """1.0: duplicate aliases made grant lookups by alias ambiguous."""
+    db.add_shared_printer("HP-1", "Accounting")
+    with pytest.raises(ValueError):
+        db.add_shared_printer("HP-2", "Accounting")
+    with pytest.raises(ValueError):          # case-insensitive
+        db.add_shared_printer("HP-2", "ACCOUNTING")
+    # rename into an existing alias is refused too
+    pid = db.add_shared_printer("HP-3", "Free")
+    with pytest.raises(ValueError):
+        db.update_shared_printer_alias(pid, "accounting")
+
+
+def test_migration_renames_duplicate_aliases(tmp_path):
+    """Old dbs without the constraint: later duplicates get 'X (2)', 'X (3)'."""
+    import sqlite3
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    # faithful pre-0.3 combined layout (migrate_split runs first)
+    con.executescript("""
+        CREATE TABLE shared_printers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            local_name TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(local_name));
+        CREATE TABLE grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            remote_id TEXT NOT NULL,
+            remote_name TEXT,
+            printer_id INTEGER NOT NULL REFERENCES shared_printers(id),
+            token TEXT NOT NULL,
+            granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            UNIQUE(remote_id, printer_id));
+        CREATE TABLE remote_printers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host_id TEXT NOT NULL,
+            host_name TEXT,
+            host_ip TEXT,
+            host_port INTEGER NOT NULL DEFAULT 9100,
+            printer_alias TEXT NOT NULL,
+            token TEXT NOT NULL,
+            granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            UNIQUE(host_id, printer_alias));
+    """)
+    con.execute("INSERT INTO shared_printers (local_name, alias) VALUES ('A', 'Front')")
+    con.execute("INSERT INTO shared_printers (local_name, alias) VALUES ('B', 'front')")
+    con.execute("INSERT INTO shared_printers (local_name, alias) VALUES ('C', 'Front')")
+    con.commit()
+    con.close()
+
+    db = Database(path, tmp_path / "p.db")   # split + _ensure_unique_alias
+    # later duplicates get suffixed, keeping their own casing
+    assert sorted(r["alias"] for r in db.list_shared_printers(enabled_only=False)) \
+        == ["Front", "Front (3)", "front (2)"]
+    # the rebuilt table enforces uniqueness case-insensitively
+    with pytest.raises(ValueError):
+        db.add_shared_printer("D", "FRONT")
+    assert db.add_shared_printer("D", "Reception") > 0
+
+
 def test_grant_upsert_rotates_token(db):
     pid = db.add_shared_printer("HP", "a")
     db.upsert_grant("111222333", pid, "tok1", "2030-01-01 00:00:00")

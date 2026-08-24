@@ -11,6 +11,7 @@ Flow (always user-consented — never auto-installs):
 Auto-checks are throttled to once a day (stamp file in the shared data
 dir); the tray menu item always checks immediately.
 """
+import hashlib
 import os
 import re
 import threading
@@ -52,9 +53,35 @@ def extract_asset(release_json: dict) -> str | None:
     return None
 
 
+def extract_checksum_url(release_json: dict) -> str | None:
+    """URL of the release's checksums.txt, None when the release predates it."""
+    for asset in release_json.get("assets") or []:
+        if asset.get("name") == "checksums.txt":
+            return asset.get("browser_download_url")
+    return None
+
+
+def expected_hash(sha_text: str, filename: str) -> str | None:
+    """Parse a `sha256sum`-style listing; case-insensitive filename match."""
+    for line in (sha_text or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]) \
+                and parts[1].lstrip("*").strip().lower() == filename.lower():
+            return parts[0].lower()
+    return None
+
+
+def verify_file_hash(path: Path, expected_hex: str) -> bool:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest() == expected_hex.lower()
+
+
 def fetch_latest_release(url: str = RELEASES_API_URL,
                          timeout: float = 10) -> dict | None:
-    """{'tag': ..., 'version': ..., 'asset_url': ...} or None."""
+    """{'tag', 'version', 'asset_url', 'sha_url'} or None."""
     try:
         r = requests.get(url, timeout=timeout,
                          headers={"Accept": "application/vnd.github+json"})
@@ -66,7 +93,8 @@ def fetch_latest_release(url: str = RELEASES_API_URL,
         log.info("release check: HTTP %d, unexpected body", r.status_code)
         return None
     return {"tag": j["tag_name"], "version": j["tag_name"],
-            "asset_url": extract_asset(j)}
+            "asset_url": extract_asset(j),
+            "sha_url": extract_checksum_url(j)}
 
 
 def check_update(local: str = VERSION, url: str = RELEASES_API_URL) -> dict | None:
@@ -93,8 +121,10 @@ def should_auto_check() -> bool:
         return True
 
 
-def download_and_install(asset_url: str, version_tag: str) -> tuple[bool, str]:
-    """Download the Setup exe to %TEMP% and launch it elevated.
+def download_and_install(asset_url: str, version_tag: str,
+                         sha_url: str | None = None) -> tuple[bool, str]:
+    """Download the Setup exe, verify its SHA256 when the release ships a
+    checksums.txt, then launch it elevated.
 
     Returns (started, message). The caller should exit the agent shortly
     after success so the installer can swap the binary and restart it."""
@@ -112,6 +142,20 @@ def download_and_install(asset_url: str, version_tag: str) -> tuple[bool, str]:
         size_mb = dest.stat().st_size / (1 << 20)
         if size_mb < 5:
             return False, f"Downloaded file looks wrong ({size_mb:.1f} MB)."
+        if sha_url:
+            sha_text = requests.get(sha_url, timeout=15).text
+            expected = expected_hash(sha_text, dest.name)
+            if expected is None:
+                dest.unlink(missing_ok=True)
+                return False, "Checksum for this installer was not published."
+            if not verify_file_hash(dest, expected):
+                dest.unlink(missing_ok=True)
+                log.error("update download FAILED checksum verification")
+                return False, ("Download failed its integrity check and was "
+                               "deleted — try again or install manually.")
+            log.info("checksum OK for %s", dest.name)
+        else:
+            log.warning("release has no checksums.txt; skipping verification")
         import win32api
         win32api.ShellExecute(0, "runas", str(dest), None, None, 0)
         log.info("installer launched (%.1f MB); agent will exit", size_mb)
