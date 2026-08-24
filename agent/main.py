@@ -227,7 +227,10 @@ def _cmd_tray() -> None:
     tray = PrintLinkTray(db, my_id, sender.request_share, on_quit,
                          selected_target=selected_target,
                          send_file_fn=sender.print_file,
-                         revoke_fn=sender.revoke_share)
+                         revoke_fn=sender.revoke_share,
+                         jobs_fn=sender.list_jobs,
+                         retry_job_fn=sender.retry_job,
+                         cancel_job_fn=sender.cancel_job)
     tray_holder["tray"] = tray
 
     # 7. update check (throttled to daily; prompt + consent, never silent)

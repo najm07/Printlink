@@ -6,6 +6,7 @@ sibling jobs are still in flight (B6).
 """
 import json
 import threading
+import time
 import requests
 import pytest
 
@@ -270,3 +271,102 @@ def test_verified_route_cached_within_ttl(monkeypatch, tmp_path):
     challenges = [u for u in cap["gets"] if u.endswith("/auth-challenge")]
     assert len(pings) == 1                         # cached route: no re-ping
     assert len(challenges) == 2                    # fresh nonce per job
+
+
+# ---------- 1.0: job log (tray "Print jobs..." view) -----------------------
+
+def test_job_log_tracks_lifecycle(fast_sender, tmp_path):
+    # 503 is retryable -> two attempts, then delivered
+    s, _db = fast_sender([FakeResp(503, "printer offline"),
+                          FakeResp(200, '{"status": "accepted"}')])
+    f = tmp_path / "j.pdf"
+    f.write_bytes(b"%PDF-1.4 x")
+    s.print_file(str(f), "111222333", "CANON")
+    assert s.wait_idle(timeout=10)
+    jobs = s.list_jobs()
+    assert len(jobs) == 1
+    j = jobs[0]
+    assert j["status"] == "delivered" and j["attempts"] == 2
+    assert j["error"] is None
+
+
+def test_failed_job_is_retryable(fast_sender, tmp_path):
+    s, _db = fast_sender([FakeResp(500, "nope"),
+                          FakeResp(200, '{"status": "ok"}')])
+    f = tmp_path / "k.pdf"
+    f.write_bytes(b"%PDF-1.4 x")
+    s.print_file(str(f), "111222333", "CANON")
+    assert s.wait_idle(timeout=10) is False
+    j = s.list_jobs()[0]
+    assert j["status"] == "failed" and j["error"] == "nope"
+
+    ok, msg = s.retry_job(j["id"])
+    assert ok, msg
+    assert s.wait_idle(timeout=10)
+    j = s.list_jobs()[0]
+    assert j["status"] == "delivered" and j["error"] is None
+
+
+def test_retry_rejects_non_failed_jobs(fast_sender, tmp_path):
+    s, _db = fast_sender([FakeResp(200, '{"status": "ok"}')])
+    f = tmp_path / "m.pdf"
+    f.write_bytes(b"%PDF-1.4 x")
+    s.print_file(str(f), "111222333", "CANON")
+    assert s.wait_idle(timeout=10)
+    jid = s.list_jobs()[0]["id"]
+    ok, why = s.retry_job(jid)
+    assert not ok and "delivered" in why
+    ok, why = s.retry_job(9999)
+    assert not ok and "No such job" in why
+
+
+def test_cancel_queued_job_prevents_send(monkeypatch, tmp_path):
+    release = threading.Event()
+
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/auth-challenge"):
+            return FakeResp(200, '{"nonce": "n"}')
+        return FakeResp(200, '{"id": "111 222 333"}')
+
+    def slow_post(url, headers=None, files=None, data=None, json=None,
+                  timeout=None):
+        release.wait(5)
+        return FakeResp(200, '{"status": "ok"}')
+
+    monkeypatch.setattr(sender_mod, "RETRY_INTERVAL_S", 0.01)
+    monkeypatch.setattr(sender_mod, "RETRY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    posts = []
+
+    def counting_post(url, **kw):
+        posts.append(url)
+        return slow_post(url, **kw)
+
+    monkeypatch.setattr(requests, "post", counting_post)
+    from sender import Sender as S
+    s = S(FakeDB(), "111 222 333", "t", lambda hid: ("127.0.0.1", 9100))
+    f = tmp_path / "c.pdf"
+    f.write_bytes(b"%PDF-1.4 x")
+    # first job occupies the worker (blocked in slow_post), second stays queued
+    s.print_file(str(f), "111222333", "CANON")
+    deadline = time.time() + 5
+    while not posts and time.time() < deadline:
+        time.sleep(0.02)
+    f2 = tmp_path / "c2.pdf"
+    f2.write_bytes(b"%PDF-1.4 x")
+    s.print_file(str(f2), "111222333", "CANON")
+    queued_id = next(j["id"] for j in s.list_jobs() if j["file"].endswith("c2.pdf"))
+    ok, _ = s.cancel_job(queued_id)
+    assert ok
+    release.set()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        j = [j for j in s.list_jobs() if j["id"] == queued_id][0]
+        if j["status"] == "cancelled":
+            break
+        time.sleep(0.02)
+    s.stop()
+    assert posts.count(posts[0]) == 1          # only the first job hit the wire
+    cancelled = [j for j in s.list_jobs() if j["id"] == queued_id][0]
+    assert cancelled["status"] == "cancelled"

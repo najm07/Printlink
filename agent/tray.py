@@ -79,20 +79,26 @@ def _notify(title: str, msg: str):
 class PrintLinkTray:
     def __init__(self, db: Database, my_id: str, send_request_fn, on_quit_fn,
                  selected_target: dict | None = None, send_file_fn=None,
-                 revoke_fn=None):
+                 revoke_fn=None, jobs_fn=None, retry_job_fn=None,
+                 cancel_job_fn=None):
         """send_request_fn(host_id, printer_alias, days, name) -> (ok, message)
         on_quit_fn() -> cleanup hook from main.py
         selected_target: {"value": (host_id, printer_alias)} shared with the
-        pipe reader so port-monitor jobs go to the user's chosen printer.
+        one-shot --send path so Explorer jobs go to the user's chosen printer.
         send_file_fn(filepath, host_id, printer_alias, options=) -> (ok, message):
         direct file send (no Windows spooler involved).
         revoke_fn(host_id, printer_alias) -> (ok, message): best-effort host-side
-        grant revocation used when the user removes a remote printer."""
+        grant revocation used when the user removes a remote printer.
+        jobs_fn() -> list[dict], retry_job_fn(id)/cancel_job_fn(id) -> (ok, msg):
+        the sender's job log for the "Print jobs..." view."""
         self.db, self.my_id = db, my_id
         self.send_request_fn = send_request_fn
         self.on_quit_fn = on_quit_fn
         self.send_file_fn = send_file_fn
         self.revoke_fn = revoke_fn
+        self.jobs_fn = jobs_fn
+        self.retry_job_fn = retry_job_fn
+        self.cancel_job_fn = cancel_job_fn
         self.selected_target = selected_target if selected_target is not None else {}
         self.icon = pystray.Icon("PrintLink", _default_icon(), "PrintLink",
                                  self._menu())
@@ -133,6 +139,7 @@ class PrintLinkTray:
             pystray.MenuItem("Copy my ID", self._copy_id),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Send document...", self._send_document),
+            pystray.MenuItem("Print jobs...", self._print_jobs),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Share a printer...", self._share_printer),
             pystray.MenuItem("My shared printers...", self._manage_shared),
@@ -517,6 +524,63 @@ class PrintLinkTray:
                 log.info("remove %s '%s' -> host revoke ok=%s msg=%r",
                          host_id, alias, r_ok, r_msg)
             _notify("PrintLink", f"'{label}' removed.{revoke_msg}")
+
+    def _print_jobs(self, *_):
+        if self.jobs_fn is None:
+            _notify("PrintLink", "No print jobs yet.")
+            return
+        jobs = self.jobs_fn()
+        if not jobs:
+            _notify("PrintLink", "No print jobs yet — everything sent has "
+                                 "been delivered and cleaned up.")
+            return
+
+        def ui(root):
+            win = tk.Toplevel(root)
+            win.title("PrintLink — print jobs")
+            win.attributes("-topmost", True)
+            lb = tk.Listbox(win, width=96, height=min(14, len(jobs)))
+            for j in jobs:
+                line = (f"[{j['status']:<9}] #{j['id']} {j['added']}  "
+                        f"{Path(j['file']).name} -> {j['alias']}"
+                        f"  ({j['attempts']} try)")
+                if j["error"]:
+                    line += f"  — {j['error'][:60]}"
+                lb.insert("end", line)
+            lb.pack(padx=10, pady=10)
+            out = {}
+
+            def selected():
+                sel = lb.curselection()
+                return jobs[sel[0]]["id"] if sel else None
+
+            def retry():
+                if (jid := selected()) is not None:
+                    out["a"], out["v"] = "retry", jid
+                    win.destroy()
+
+            def forget():
+                if (jid := selected()) is not None:
+                    out["a"], out["v"] = "cancel", jid
+                    win.destroy()
+
+            btns = tk.Frame(win)
+            tk.Button(btns, text="Retry failed", command=retry).pack(side="left", padx=4)
+            tk.Button(btns, text="Cancel queued", command=forget).pack(side="left", padx=4)
+            tk.Button(btns, text="Close",
+                      command=lambda: (out.setdefault("a", "close"),
+                                       win.destroy())).pack(side="left", padx=4)
+            btns.pack(pady=(0, 10))
+            win.wait_window()
+            return out.get("a"), out.get("v")
+
+        for _ in range(20):   # allow repeated actions before closing
+            action, jid = _dialog(ui)
+            if not action or action == "close":
+                return
+            fn = self.retry_job_fn if action == "retry" else self.cancel_job_fn
+            ok, msg = fn(jid) if fn else (False, "unavailable")
+            _notify("PrintLink", msg)
 
     def _list_remotes(self, *_):
         # status column stays 'active' since 0.3 (host is authoritative);

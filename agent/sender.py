@@ -56,6 +56,10 @@ class Sender:
         self._ever_failed = False
         self.last_error: str | None = None
         self._lock = threading.Lock()
+        # job log for the tray's "Print jobs..." view (newest last)
+        self._job_log: dict[int, dict] = {}
+        self._job_seq = 0
+        self._cancelled: set[int] = set()
         # host_id -> (base_url, valid_until): a route we /ping-verified as
         # really belonging to that ID (audit S2 — stale-IP impersonation).
         self._routes: dict[str, tuple[str, float]] = {}
@@ -242,8 +246,11 @@ class Sender:
             log.warning("print_file %s -> %s@%s rejected: %s",
                         filepath, printer_alias, host_id, check["error"])
             return False, check["error"]
+        jid = self._job_register(str(filepath), normalize_id(host_id),
+                                 printer_alias, bool(delete_after),
+                                 dict(options or {}))
         self._jobs.put((str(filepath), normalize_id(host_id), printer_alias, 0,
-                        bool(delete_after), dict(options or {})))
+                        bool(delete_after), dict(options or {}), jid))
         with self._lock:
             was_idle = self._pending == 0
             self._pending += 1
@@ -256,6 +263,82 @@ class Sender:
         log.info("print_file %s queued for %s@%s (options=%r)",
                  filepath, printer_alias, host_id, options or {})
         return True, "Job queued."
+
+    # ---------- job log (tray "Print jobs..." view) ----------
+    def _job_register(self, filepath: str, host_id: str, alias: str,
+                      delete_after: bool, options: dict) -> int:
+        with self._lock:
+            self._job_seq += 1
+            jid = self._job_seq
+            self._job_log[jid] = {
+                "id": jid, "file": filepath, "host": host_id, "alias": alias,
+                "delete_after": delete_after, "options": options,
+                "status": "queued", "attempts": 0, "error": None,
+                "added": time.strftime("%H:%M:%S"),
+            }
+            # keep the log bounded: drop oldest finished entries first
+            over = len(self._job_log) - 60
+            if over > 0:
+                done = [k for k in sorted(self._job_log)
+                        if self._job_log[k]["status"]
+                        in ("delivered", "failed", "cancelled")][:over]
+                for k in done:
+                    self._job_log.pop(k)
+            return jid
+
+    def _job_set(self, jid: int, status: str | None = None,
+                 error: str | None = None, attempts: int | None = None) -> None:
+        with self._lock:
+            j = self._job_log.get(jid)
+            if not j:
+                return
+            if status:
+                j["status"] = status
+            if attempts is not None:
+                j["attempts"] = attempts
+            if error is not None:        # "" clears the stored error
+                j["error"] = str(error)[:200] or None
+
+    def list_jobs(self) -> list[dict]:
+        """Snapshot for the tray view, newest first."""
+        with self._lock:
+            return [dict(v) for v in
+                    sorted(self._job_log.values(),
+                           key=lambda j: j["id"], reverse=True)]
+
+    def cancel_job(self, job_id: int) -> tuple[bool, str]:
+        """Best-effort cancel: jobs already on the wire finish; queued ones
+        are skipped by the retry loop. Never deletes the user's document."""
+        with self._lock:
+            j = self._job_log.get(job_id)
+            if not j:
+                return False, "No such job."
+            if j["status"] in ("delivered", "failed", "cancelled"):
+                return False, f"Job already {j['status']}."
+            self._cancelled.add(job_id)
+        return True, "Job will be cancelled."
+
+    def retry_job(self, job_id: int) -> tuple[bool, str]:
+        """Re-queue a failed/cancelled job whose file still exists."""
+        with self._lock:
+            j = self._job_log.get(job_id)
+            if not j:
+                return False, "No such job."
+            if j["status"] not in ("failed", "cancelled"):
+                return False, f"Only failed jobs can be retried (this one is {j['status']})."
+        if not os.path.isfile(j["file"]):
+            return False, "The document no longer exists on disk."
+        self._cancelled.discard(job_id)
+        self._jobs.put((j["file"], j["host"], j["alias"], 0,
+                        j["delete_after"], dict(j["options"]), job_id))
+        self._job_set(job_id, status="queued", error="")
+        with self._lock:
+            was_idle = self._pending == 0
+            self._pending += 1
+            if was_idle:
+                self._ever_failed = False   # user-driven retry: fresh cycle
+            self._drained.clear()
+        return True, "Job re-queued."
 
     def _send_once(self, filepath: str, host_id: str,
                    printer_alias: str, options: dict | None = None
@@ -333,18 +416,27 @@ class Sender:
             except queue.Empty:
                 pass
             still = []
-            for filepath, host_id, alias, attempts, delete_after, options in pending:
+            for filepath, host_id, alias, attempts, delete_after, options, jid \
+                    in pending:
+                if jid in self._cancelled:
+                    self._cancelled.discard(jid)
+                    self._job_set(jid, status="cancelled")
+                    self._job_done(filepath, host_id, alias, False,
+                                   "cancelled by user")
+                    continue
                 log.info("retry_loop: attempt %d for %s@%s (%s)",
                          attempts + 1, alias, host_id, Path(filepath).name)
+                self._job_set(jid, status="sending", attempts=attempts + 1)
                 ok, retryable = self._send_once(filepath, host_id, alias, options)
+                reason = self.last_error or "unknown error"
                 if ok:
                     if delete_after:
                         self._cleanup(filepath)
                     log.info("retry_loop: delivered %s to %s@%s",
                              Path(filepath).name, alias, host_id)
+                    self._job_set(jid, status="delivered", error="")
                     self._job_done(filepath, host_id, alias, True)
                     continue  # delivered
-                reason = self.last_error or "unknown error"
                 if attempts == 0 and self.on_printer_error:
                     # first failed attempt: tell the user what's wrong now,
                     # before the silent retry period starts
@@ -353,22 +445,20 @@ class Sender:
                     except Exception:
                         log.exception("printer-error callback failed for %s",
                                       filepath)
-                if not retryable:
-                    log.error("retry_loop: giving up on %s (receiver rejected, "
-                              "not retryable): %s", Path(filepath).name, reason)
+                give_up = not retryable or attempts + 1 >= max_attempts
+                if give_up:
+                    why = ("receiver rejected" if not retryable
+                           else f"after {max_attempts} attempts")
+                    log.error("retry_loop: giving up on %s (%s): %s",
+                              Path(filepath).name, why, reason)
                     if delete_after:
                         self._cleanup(filepath)
+                    self._job_set(jid, status="failed", error=reason)
                     self._job_done(filepath, host_id, alias, False, reason)
                     continue
-                if attempts + 1 < max_attempts:
-                    still.append((filepath, host_id, alias, attempts + 1,
-                                  delete_after, options))
-                else:
-                    log.error("retry_loop: giving up on %s after %d attempts",
-                              Path(filepath).name, max_attempts)
-                    if delete_after:
-                        self._cleanup(filepath)
-                    self._job_done(filepath, host_id, alias, False, reason)
+                still.append((filepath, host_id, alias, attempts + 1,
+                              delete_after, options, jid))
+                self._job_set(jid, status="queued", error=reason)
             pending = still
             if pending:
                 log.info("retry_loop: %d job(s) pending, retrying in %ds",
