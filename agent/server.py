@@ -377,7 +377,7 @@ class _TLSWSGIHandler(BaseHTTPRequestHandler):
     def _wsgi_env(self, body: bytes) -> dict:
         parsed = urlsplit(self.path)
         addr = self.server.server_address
-        return {
+        env = {
             "REQUEST_METHOD": self.command,
             "PATH_INFO": unquote(parsed.path),
             "QUERY_STRING": parsed.query,
@@ -395,6 +395,9 @@ class _TLSWSGIHandler(BaseHTTPRequestHandler):
             "wsgi.multiprocess": False,
             "wsgi.run_once": False,
         }
+        for k, v in self.headers.items():
+            env["HTTP_" + k.upper().replace("-", "_")] = v
+        return env
 
     def _dispatch(self):
         try:
