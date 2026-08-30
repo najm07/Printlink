@@ -6,7 +6,7 @@ from pathlib import Path
 APP_NAME = "PrintLink"
 
 # Keep in sync with MyAppVersion in installer/printlink.iss
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # --- storage (split since 0.3, see docs/security.md) ---
 # SHARED: %PROGRAMDATA%\PrintLink — machine-wide, nothing secret. Holds the
