@@ -377,7 +377,7 @@ class _TLSWSGIHandler(BaseHTTPRequestHandler):
     def _wsgi_env(self, body: bytes) -> dict:
         parsed = urlsplit(self.path)
         addr = self.server.server_address
-        return {
+        env = {
             "REQUEST_METHOD": self.command,
             "PATH_INFO": unquote(parsed.path),
             "QUERY_STRING": parsed.query,
@@ -386,6 +386,8 @@ class _TLSWSGIHandler(BaseHTTPRequestHandler):
             "SERVER_PROTOCOL": self.request_version,
             "CONTENT_LENGTH": str(len(body)),
             "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            "REMOTE_ADDR": self.client_address[0],
+            "REMOTE_PORT": str(self.client_address[1]),
             "wsgi.version": (1, 0),
             "wsgi.url_scheme": "https" if getattr(self.server, "tls", False)
                                else "http",
@@ -395,6 +397,12 @@ class _TLSWSGIHandler(BaseHTTPRequestHandler):
             "wsgi.multiprocess": False,
             "wsgi.run_once": False,
         }
+        # WSGI requires HTTP headers as HTTP_* keys — without this Flask
+        # sees no X-Sender-ID / X-Nonce / X-Signature and every /print
+        # fails with "missing credentials".
+        for key, value in self.headers.items():
+            env["HTTP_" + key.upper().replace("-", "_")] = value
+        return env
 
     def _dispatch(self):
         try:
