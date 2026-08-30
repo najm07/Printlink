@@ -102,6 +102,9 @@ def check_update(local: str = VERSION, url: str = RELEASES_API_URL) -> dict | No
     rel = fetch_latest_release(url)
     if not rel or not is_newer(rel["version"], local):
         return None
+    if not rel.get("asset_url"):
+        log.info("update %s has no installer asset yet — skipping offer", rel["version"])
+        return None
     log.info("update available: %s (running %s)", rel["version"], local)
     return rel
 
