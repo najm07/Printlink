@@ -345,7 +345,8 @@ def test_cancel_queued_job_prevents_send(monkeypatch, tmp_path):
 
     monkeypatch.setattr(requests, "post", counting_post)
     from sender import Sender as S
-    s = S(FakeDB(), "111 222 333", "t", lambda hid: ("127.0.0.1", 9100))
+    s = S(FakeDB(), "111 222 333", "t", lambda hid: ("127.0.0.1", 9100),
+          probe_tls=False)
     f = tmp_path / "c.pdf"
     f.write_bytes(b"%PDF-1.4 x")
     # first job occupies the worker (blocked in slow_post), second stays queued

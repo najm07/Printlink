@@ -36,8 +36,13 @@ class RequestsHttp:
         import urllib3
         s = requests.Session()
         if fingerprint_hex:
-            # fingerprint IS the trust anchor: no CA check needed
+            # fingerprint IS the trust anchor: disable CA verification and
+            # rely solely on the pinned fingerprint (checked by the custom
+            # poolmanager). Without verify=False the self-signed cert still
+            # fails CA verification before the fingerprint is even checked.
             s.mount("https://", PinnedAdapterHosts.adapter(fingerprint_hex))
+            s.verify = False
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         else:
             s.verify = False     # first contact only — pinned immediately after
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -140,9 +145,11 @@ class Sender:
     def _session_for(self, host_id: str):
         """Pinned session for a host whose fingerprint we know; None means
         'no fp yet' → caller must capture one via probe before sending."""
+        host_id = normalize_id(host_id)
         return self._tls_sessions.get(host_id)
 
     def _set_host_fp(self, host_id: str, fp: str, persist=True) -> None:
+        host_id = normalize_id(host_id)
         self._fps[host_id] = fp
         if host_id not in self._tls_sessions:
             try:
@@ -160,10 +167,11 @@ class Sender:
     def _ensure_host_fp(self, host_id: str, base: str) -> bool:
         """True when we have (or just captured) the host's cert fingerprint.
         Missing fp on an existing row = 0.4→1.0 upgrade: one TOFU capture."""
+        host_id = normalize_id(host_id)
         if self._fps.get(host_id) or self._tls_sessions.get(host_id):
             return True
         rp = next((r for r in self.db.list_remote_printers(status=None)
-                   if r["host_id"] == normalize_id(host_id)), None)
+                    if normalize_id(r["host_id"]) == host_id), None)
         stored = self._row_tls_fp(rp)
         if stored:
             self._set_host_fp(host_id, stored, persist=False)
@@ -190,7 +198,7 @@ class Sender:
             log.info("resolved %s -> %s:%s (mDNS)", host_id, ip, port)
             return f"https://{ip}:{port}"
         rp = next((r for r in self.db.list_remote_printers(status=None)
-                   if r["host_id"] == host_id), None)
+                    if normalize_id(r["host_id"]) == host_id), None)
         if rp and rp["host_ip"]:
             log.info("resolved %s -> %s:%s (stored IP)", host_id,
                      rp["host_ip"], rp["host_port"])
@@ -201,9 +209,10 @@ class Sender:
     def _identify(self, base: str, host_id: str | None = None) -> str | None:
         """Peer's self-reported ID from /ping; None when unreachable or
         the answer isn't a well-formed 200."""
+        host_id = normalize_id(host_id or "")
         try:
             r = self.http.get(f"{base}/ping", timeout=CONNECT_TIMEOUT_S,
-                              session=self._session_for(host_id or ""))
+                              session=self._session_for(host_id))
         except requests.RequestException as e:
             log.warning("ping %s failed: %r", base, e)
             return None

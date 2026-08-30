@@ -422,11 +422,19 @@ class Database:
             return con.execute(q, args).fetchall()
 
     def update_remote_host_ip(self, host_id: str, ip: str, port: int = 9100) -> None:
+        from identity import normalize_id
+        host_id = normalize_id(host_id)
         with self.connect_private() as con:
-            con.execute("UPDATE remote_printers SET host_ip = ?, host_port = ? WHERE host_id = ?",
+            # host_id may be stored with or without spaces (pre-1.0 rows);
+            # match either form so the update never silently does nothing.
+            con.execute("UPDATE remote_printers SET host_ip = ?, host_port = ? "
+                        "WHERE REPLACE(host_id, ' ', '') = REPLACE(?, ' ', '')",
                         (ip, port, host_id))
 
     def update_remote_tls_fp(self, host_id: str, tls_fp: str) -> None:
+        from identity import normalize_id
+        host_id = normalize_id(host_id)
         with self.connect_private() as con:
-            con.execute("UPDATE remote_printers SET tls_fp = ? WHERE host_id = ?",
+            con.execute("UPDATE remote_printers SET tls_fp = ? "
+                        "WHERE REPLACE(host_id, ' ', '') = REPLACE(?, ' ', '')",
                         (tls_fp, host_id))

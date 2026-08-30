@@ -96,6 +96,12 @@ class PinnedAdapterHosts:
         fp = ":".join(fingerprint_hex[i:i + 2]
                       for i in range(0, len(fingerprint_hex), 2)).lower()
         adapter = requests.adapters.HTTPAdapter()
-        # fingerprint IS the trust anchor: skip CA verification entirely
-        adapter.poolmanager = urllib3.PoolManager(assert_fingerprint=fp)
+        # fingerprint IS the trust anchor: skip CA + hostname verification,
+        # only the pinned fingerprint matters. Without cert_reqs=CERT_NONE the
+        # self-signed cert still fails CA verification before the fingerprint
+        # is even checked, and without assert_hostname=False an IP-based URL
+        # fails because the cert only carries DNS:printlink.local.
+        adapter.poolmanager = urllib3.PoolManager(
+            assert_fingerprint=fp, cert_reqs=ssl.CERT_NONE,
+            assert_hostname=False)
         return adapter
